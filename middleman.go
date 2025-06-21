@@ -71,10 +71,12 @@ func loadConfig(path string) (*Config, error) {
 
 // ProxyConnection manages the connection between a client and a server.
 type ProxyConnection struct {
-	clientPort    int
-	serverConfig  ServerConfig
-	serverConn    net.Conn
-	mutex         sync.Mutex
+	connectionID string
+	clientConn   net.Conn
+	clientPort   int
+	serverConfig ServerConfig
+	serverConn   net.Conn
+	mutex        sync.Mutex
 	cancelForward context.CancelFunc
 	expiries      []time.Time
 	wsConn        *websocket.Conn
@@ -184,14 +186,21 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 	clientAddr := clientConn.RemoteAddr().String()
 	log.Printf("Client %s connected to port %d", clientAddr, clientPort)
 
+	// Generate a unique connection ID
+	connectionID := fmt.Sprintf("%s_%d_%d", clientConn.RemoteAddr().String(), clientPort, time.Now().UnixNano())
+	
 	proxyConn := &ProxyConnection{
-		clientPort:   clientPort,
-		serverConfig: serverConfig,
-		expiries:     []time.Time{},
-		processorCfg: p.processorCfg,
+		connectionID:  connectionID,
+		clientConn:    clientConn,
+		clientPort:    clientPort,
+		serverConfig:  serverConfig,
+		expiries:      []time.Time{},
+		processorCfg:  p.processorCfg,
+		wsMutex:       sync.Mutex{},
+		mutex:         sync.Mutex{},
 	}
 
-	connectionID := fmt.Sprintf("%s_%d", clientAddr, clientPort)
+	// Store the connection in the proxy's connection map
 	p.connMutex.Lock()
 	p.connections[connectionID] = proxyConn
 	p.connMutex.Unlock()
@@ -259,7 +268,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		processedData := buf[:n]
 		if proxyConn.processorCfg.Enabled {
 			// log.Printf("DEBUG: Sending to processor: %s", string(processedData))
-			processedResponse, err := proxyConn.forwardToProcessor(processedData)
+			processedResponse, err := proxyConn.forwardToProcessor(processedData, "client")
 			if err != nil {
 				log.Printf("Error processing message: %v. Forwarding original message.", err)
 				// Keep the original message if there was an error
@@ -364,20 +373,21 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, clientAddr 
 
 	// If message processor is enabled, forward through it
 	if pc.processorCfg.Enabled {
-		processed, err := pc.forwardToProcessor(message)
+		processed, err := pc.forwardToProcessor(message, "server")
 		if err != nil {
 			log.Printf("Error processing message: %v, falling back to direct forwarding", err)
 			// Fall back to direct forwarding on error
-			pc.writeToClient(clientConn, clientAddr, message, proxy)
-		} else if len(processed) > 0 {
-			pc.writeToClient(clientConn, clientAddr, processed, proxy)
+			_, _ = clientConn.Write(message)
+			return
 		}
-	} else {
-		// Direct forwarding if processor is disabled
-		pc.writeToClient(clientConn, clientAddr, message, proxy)
+		message = processed
 	}
+
+	// Forward the (possibly processed) message to the client
+	_, _ = clientConn.Write(message)
 }
 
+// forwardServerToClient forwards messages from the server to the client
 func (pc *ProxyConnection) forwardServerToClient(clientConn net.Conn, clientAddr string, ctx context.Context, proxy *SocketProxy) {
 	// defer clientConn.Close()
 
@@ -512,9 +522,46 @@ func ensureNewline(data []byte) []byte {
 	return data
 }
 
+// MessageWrapper is used to wrap messages with metadata
+// when sending to the processor
+type MessageWrapper struct {
+	Source       string          `json:"source"`        // "client" or "server"
+	ClientAddr   string          `json:"client_addr"`   // Client's remote address
+	ServerAddr   string          `json:"server_addr"`   // Server's address (if connected)
+	ConnectionID string          `json:"connection_id"` // Unique ID for this connection
+	Timestamp    string          `json:"timestamp"`     // When the message was sent
+	Message      json.RawMessage `json:"message"`       // The original message
+}
+
 // forwardToProcessor sends a message to the external processor and returns the response.
 // The response is guaranteed to end with a newline.
-func (pc *ProxyConnection) forwardToProcessor(message []byte) ([]byte, error) {
+// source indicates where the message originated from ("client" or "server")
+func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]byte, error) {
+	// Get the current timestamp in ISO 8601 format
+	timestamp := time.Now().UTC().Format(time.RFC3339)
+	
+	// Get the client and server addresses
+	clientAddr := ""
+	serverAddr := ""
+	
+	// If we have a direct client connection, use its address
+	if pc.clientConn != nil {
+		clientAddr = pc.clientConn.RemoteAddr().String()
+	} else {
+		// Otherwise use the client port if available
+		if pc.clientPort > 0 {
+			clientAddr = fmt.Sprintf("unknown_client:%d", pc.clientPort)
+		} else {
+			clientAddr = "unknown_client"
+		}
+	}
+	
+	// Add server address if connected
+	if pc.serverConn != nil {
+		serverAddr = pc.serverConn.RemoteAddr().String()
+	} else {
+		serverAddr = fmt.Sprintf("%s:%d", pc.serverConfig.Host, pc.serverConfig.Port)
+	}
 	pc.wsMutex.Lock()
 	defer pc.wsMutex.Unlock()
 
@@ -561,9 +608,27 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte) ([]byte, error) {
 			log.Println("DEBUG: Successfully connected to processor")
 		}
 
+		// Wrap the message with source and connection information
+		msgWrapper := MessageWrapper{
+			Source:       source,
+			ClientAddr:   clientAddr,
+			ServerAddr:   serverAddr,
+			ConnectionID: pc.connectionID,
+			Timestamp:    timestamp,
+			Message:      json.RawMessage(message),
+		}
+		
+		// Convert to JSON
+		var messageData []byte
+		messageData, err = json.Marshal(msgWrapper)
+		if err != nil {
+			log.Printf("ERROR: Failed to marshal message wrapper: %v", err)
+			return nil, fmt.Errorf("failed to marshal message wrapper: %w", err)
+		}
+
 		// Send the message
-		// log.Printf("DEBUG: Sending message to processor: %s", string(message))
-		err = pc.wsConn.WriteMessage(websocket.TextMessage, message)
+		// log.Printf("DEBUG: Sending message to processor: %s", string(messageData))
+		err = pc.wsConn.WriteMessage(websocket.TextMessage, messageData)
 		if err != nil {
 			log.Printf("ERROR: Failed to send message (attempt %d/%d): %v", i+1, maxRetries+1, err)
 			pc.wsConn.Close()

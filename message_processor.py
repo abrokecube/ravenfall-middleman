@@ -44,23 +44,50 @@ async def process_message(message: str) -> str:
         message: The incoming message as a string (expected to be JSON)
         
     Returns:
-        str: The processed message as a JSON string
+        str: The processed message as a JSON string with a trailing newline
     """
     try:
         # Parse the incoming message as JSON
         data = json.loads(message)
         
-        # Return the processed message as JSON
-        return json.dumps(data)
+        # Check if this is a wrapped message with source information
+        if isinstance(data, dict) and 'source' in data and 'message' in data:
+            source = data['source']  # 'client' or 'server'
+            message_content = data['message']
+            
+            # Log the message with all its metadata
+            logger.info(
+                f"Processing {source.upper()} message from {data.get('client_addr', 'unknown')} "
+                f"(conn: {data.get('connection_id', 'unknown')}) at {data.get('timestamp')}"
+            )
+            
+            # Here you can add source-specific processing if needed
+            if source == 'client':
+                # Process client message
+                processed_content = message_content
+                logger.debug(f"Client message content: {message_content}")
+            else:  # server
+                # Process server message
+                processed_content = message_content
+                logger.debug(f"Server message content: {message_content}")
+                
+            # Return the processed content (you might want to wrap it back with source info)
+            return json.dumps(processed_content) + '\n'
+            
+        # If it's not a wrapped message, process it as before
+        return json.dumps(data) + '\n'
         
     except json.JSONDecodeError as e:
         error_msg = f"Invalid JSON: {str(e)}"
-        logger.error(error_msg)
-        return json.dumps({"error": error_msg, "original_message": message})
+        logger.error(f"{error_msg}. Message: {message[:200]}")
+        # Return the original message with newline if it had one
+        if not message.endswith('\n'):
+            message += '\n'
+        return message
     except Exception as e:
         error_msg = f"Error processing message: {str(e)}"
         logger.error(error_msg, exc_info=DEBUG)
-        return json.dumps({"error": error_msg, "original_message": message})
+        return json.dumps({"error": error_msg, "original_message": message}) + '\n'
 
 async def handler(websocket):
     """Handle incoming WebSocket connections and messages."""
@@ -78,7 +105,7 @@ async def handler(websocket):
             # Process the message and send response
             response = await process_message(message)
             await websocket.send(response)
-            logger.debug(f"Sent response to {client_ip}")
+            logger.debug(f"Sent response: {response[:100]}..." if len(response) > 100 else f"Sent response: {response}")
             
     except websockets.exceptions.ConnectionClosed:
         logger.info(f"Connection closed by client {client_ip}")
