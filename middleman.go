@@ -71,12 +71,12 @@ func loadConfig(path string) (*Config, error) {
 
 // ProxyConnection manages the connection between a client and a server.
 type ProxyConnection struct {
-	connectionID string
-	clientConn   net.Conn
-	clientPort   int
-	serverConfig ServerConfig
-	serverConn   net.Conn
-	mutex        sync.Mutex
+	connectionID  string
+	clientConn    net.Conn
+	clientPort    int
+	serverConfig  ServerConfig
+	serverConn    net.Conn
+	mutex         sync.Mutex
 	cancelForward context.CancelFunc
 	expiries      []time.Time
 	wsConn        *websocket.Conn
@@ -188,16 +188,16 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 
 	// Generate a unique connection ID
 	connectionID := fmt.Sprintf("%s_%d_%d", clientConn.RemoteAddr().String(), clientPort, time.Now().UnixNano())
-	
+
 	proxyConn := &ProxyConnection{
-		connectionID:  connectionID,
-		clientConn:    clientConn,
-		clientPort:    clientPort,
-		serverConfig:  serverConfig,
-		expiries:      []time.Time{},
-		processorCfg:  p.processorCfg,
-		wsMutex:       sync.Mutex{},
-		mutex:         sync.Mutex{},
+		connectionID: connectionID,
+		clientConn:   clientConn,
+		clientPort:   clientPort,
+		serverConfig: serverConfig,
+		expiries:     []time.Time{},
+		processorCfg: p.processorCfg,
+		wsMutex:      sync.Mutex{},
+		mutex:        sync.Mutex{},
 	}
 
 	// Store the connection in the proxy's connection map
@@ -241,7 +241,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		if jsonErr := json.Unmarshal(buf[:n], &msg); jsonErr == nil {
 			if msg.Identifier != "" {
 				if timeout, ok := p.identifierTimeouts[msg.Identifier]; ok {
-					log.Printf("Identifier '%s' found, starting a timer for %v", msg.Identifier, timeout)
+					// log.Printf("Identifier '%s' found, starting a timer for %v", msg.Identifier, timeout)
 					proxyConn.addExpiry(timeout)
 					parsedWithIdentifier = true
 				} else {
@@ -539,11 +539,11 @@ type MessageWrapper struct {
 func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]byte, error) {
 	// Get the current timestamp in ISO 8601 format
 	timestamp := time.Now().UTC().Format(time.RFC3339)
-	
+
 	// Get the client and server addresses
 	clientAddr := ""
 	serverAddr := ""
-	
+
 	// If we have a direct client connection, use its address
 	if pc.clientConn != nil {
 		clientAddr = pc.clientConn.RemoteAddr().String()
@@ -555,7 +555,7 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 			clientAddr = "unknown_client"
 		}
 	}
-	
+
 	// Add server address if connected
 	if pc.serverConn != nil {
 		serverAddr = pc.serverConn.RemoteAddr().String()
@@ -617,7 +617,7 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 			Timestamp:    timestamp,
 			Message:      json.RawMessage(message),
 		}
-		
+
 		// Convert to JSON
 		var messageData []byte
 		messageData, err = json.Marshal(msgWrapper)
