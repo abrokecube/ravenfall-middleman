@@ -1,0 +1,15 @@
+{
+    "enableMessageLogging": true,
+    "defaultTimeoutSeconds": 15,
+    "noIdentifierTimeoutSeconds": 5,
+    "identifier_timeouts": {
+        "island_info": 30
+    },
+    "proxy_mappings": [
+        {
+            "clientPort": 8041,
+            "serverHost": "localhost",
+            "serverPort": 4041
+        }
+    ]
+}
