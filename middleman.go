@@ -13,6 +13,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // ClientMessage defines the structure of the JSON message from the client.
@@ -26,6 +28,12 @@ type ServerConfig struct {
 	Port int
 }
 
+// MessageProcessorConfig holds the configuration for the message processor.
+type MessageProcessorConfig struct {
+	Enabled bool   `json:"enabled"`
+	URL     string `json:"url"`
+}
+
 // Config holds the full configuration from the JSON file.
 type Config struct {
 	EnableMessageLogging       bool           `json:"enableMessageLogging"`
@@ -37,6 +45,7 @@ type Config struct {
 		ServerHost string `json:"serverHost"`
 		ServerPort int    `json:"serverPort"`
 	} `json:"proxy_mappings"`
+	MessageProcessor MessageProcessorConfig `json:"messageProcessor"`
 }
 
 // loadConfig reads the configuration file and returns the configuration.
@@ -68,6 +77,9 @@ type ProxyConnection struct {
 	mutex         sync.Mutex
 	cancelForward context.CancelFunc
 	expiries      []time.Time
+	wsConn        *websocket.Conn
+	wsMutex       sync.Mutex
+	processorCfg  MessageProcessorConfig
 }
 
 // SocketProxy manages all proxy connections.
@@ -80,6 +92,7 @@ type SocketProxy struct {
 	noIdentifierTimeout  time.Duration
 	identifierTimeouts   map[string]time.Duration
 	enableMessageLogging bool
+	processorCfg         MessageProcessorConfig
 }
 
 // NewSocketProxy creates a new SocketProxy.
@@ -129,6 +142,7 @@ func NewSocketProxy(config *Config) *SocketProxy {
 		noIdentifierTimeout:  noIdentifierTimeout,
 		identifierTimeouts:   identifierTimeouts,
 		enableMessageLogging: config.EnableMessageLogging,
+		processorCfg:         config.MessageProcessor,
 	}
 }
 
@@ -174,6 +188,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		clientPort:   clientPort,
 		serverConfig: serverConfig,
 		expiries:     []time.Time{},
+		processorCfg: p.processorCfg,
 	}
 
 	connectionID := fmt.Sprintf("%s_%d", clientAddr, clientPort)
@@ -187,20 +202,23 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		delete(p.connections, connectionID)
 		p.connMutex.Unlock()
 		clientConn.Close()
-		log.Printf("Client %s connection closed", clientAddr)
+		log.Printf("Client %s disconnected from port %d", clientAddr, clientPort)
 	}()
 
 	buf := make([]byte, 4096)
 	for {
-		clientConn.SetReadDeadline(time.Now().Add(1 * time.Second))
-		n, err := clientConn.Read(buf)
-
-		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-			continue
+		// Set a read deadline to prevent blocking forever
+		if err := clientConn.SetReadDeadline(time.Now().Add(p.defaultIdleTimeout)); err != nil {
+			log.Printf("Error setting read deadline on client connection: %v", err)
+			break
 		}
 
+		n, err := clientConn.Read(buf)
 		if err != nil {
-			if err != io.EOF {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue // It's a timeout, continue listening
+			}
+			if err != io.EOF && !isClosedConnError(err) {
 				log.Printf("Error reading from client %s: %v", clientAddr, err)
 			}
 			break
@@ -218,7 +236,6 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 					proxyConn.addExpiry(timeout)
 					parsedWithIdentifier = true
 				} else {
-					// Message has an identifier but it's not in our timeout map, use default timeout
 					proxyConn.addExpiry(p.defaultIdleTimeout)
 					parsedWithIdentifier = true
 				}
@@ -226,7 +243,6 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		}
 
 		if !parsedWithIdentifier {
-			// Message has no Identifier field, use the no-identifier timeout
 			proxyConn.addExpiry(p.noIdentifierTimeout)
 		}
 
@@ -240,7 +256,27 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 			go proxyConn.forwardServerToClient(clientConn, clientAddr, ctx, p)
 		}
 
-		if _, err := proxyConn.serverConn.Write(buf[:n]); err != nil {
+		processedData := buf[:n]
+		if proxyConn.processorCfg.Enabled {
+			// log.Printf("DEBUG: Sending to processor: %s", string(processedData))
+			processedResponse, err := proxyConn.forwardToProcessor(processedData)
+			if err != nil {
+				log.Printf("Error processing message: %v. Forwarding original message.", err)
+				// Keep the original message if there was an error
+				processedData = buf[:n]
+			} else {
+				// Only use the processed data if we got a valid response
+				if len(processedResponse) > 0 {
+					processedData = processedResponse
+					// log.Printf("DEBUG: Using processed message: %s", string(processedData))
+				} else {
+					log.Printf("WARNING: Empty response from processor, using original message")
+				}
+			}
+		}
+
+		// log.Printf("DEBUG: Forwarding to server: %s", string(processedData))
+		if _, err := proxyConn.serverConn.Write(processedData); err != nil {
 			log.Printf("Error writing to server: %v", err)
 			proxyConn.disconnectFromServer()
 			break
@@ -270,7 +306,6 @@ func (pc *ProxyConnection) disconnectFromServer() {
 
 	if pc.serverConn != nil {
 		log.Printf("Disconnecting from server %s:%d", pc.serverConfig.Host, pc.serverConfig.Port)
-		// Set Linger to 0 to send an RST on close
 		if tcpConn, ok := pc.serverConn.(*net.TCPConn); ok {
 			tcpConn.SetLinger(0)
 		}
@@ -280,6 +315,13 @@ func (pc *ProxyConnection) disconnectFromServer() {
 	if pc.cancelForward != nil {
 		pc.cancelForward()
 		pc.cancelForward = nil
+	}
+
+	pc.wsMutex.Lock()
+	defer pc.wsMutex.Unlock()
+	if pc.wsConn != nil {
+		pc.wsConn.Close()
+		pc.wsConn = nil
 	}
 }
 
@@ -295,76 +337,118 @@ func (pc *ProxyConnection) addExpiry(duration time.Duration) {
 	defer pc.mutex.Unlock()
 	expiry := time.Now().Add(duration)
 	pc.expiries = append(pc.expiries, expiry)
-	// log.Printf("Added expiry timer: %v from now (expires at: %v) for connection to %s:%d",
-	// 	duration.Round(time.Millisecond),
-	// 	expiry.Format("15:04:05.000"),
-	// 	pc.serverConfig.Host,
-	// 	pc.serverConfig.Port)
 }
 
-// shouldDisconnect checks if the connection should be disconnected based on its timers.
-// It prunes expired timers and returns true if no active timers are left.
-func (pc *ProxyConnection) shouldDisconnect() bool {
-	pc.mutex.Lock()
-	defer pc.mutex.Unlock()
-
-	now := time.Now()
-	activeExpiries := []time.Time{}
-	for _, expiry := range pc.expiries {
-		if expiry.After(now) {
-			activeExpiries = append(activeExpiries, expiry)
-		}
+// writeToClient writes data to the client connection with error handling and logging
+func (pc *ProxyConnection) writeToClient(conn net.Conn, clientAddr string, data []byte, proxy *SocketProxy) error {
+	if len(data) == 0 {
+		return nil
 	}
 
-	pc.expiries = activeExpiries
-	return len(pc.expiries) == 0
+	// Log the message being sent to the client
+	proxy.logMessage("SERVER -> CLIENT", clientAddr, pc.clientPort, data)
+
+	// Write the data to the client
+	_, err := conn.Write(data)
+	if err != nil && !isClosedConnError(err) {
+		log.Printf("Error writing to client %s: %v", clientAddr, err)
+	}
+	return err
+}
+
+// processServerMessage processes a complete message from the server
+func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, clientAddr string, message []byte, proxy *SocketProxy) {
+	if len(message) == 0 {
+		return
+	}
+
+	// If message processor is enabled, forward through it
+	if pc.processorCfg.Enabled {
+		processed, err := pc.forwardToProcessor(message)
+		if err != nil {
+			log.Printf("Error processing message: %v, falling back to direct forwarding", err)
+			// Fall back to direct forwarding on error
+			pc.writeToClient(clientConn, clientAddr, message, proxy)
+		} else if len(processed) > 0 {
+			pc.writeToClient(clientConn, clientAddr, processed, proxy)
+		}
+	} else {
+		// Direct forwarding if processor is disabled
+		pc.writeToClient(clientConn, clientAddr, message, proxy)
+	}
 }
 
 func (pc *ProxyConnection) forwardServerToClient(clientConn net.Conn, clientAddr string, ctx context.Context, proxy *SocketProxy) {
-	buf := make([]byte, 4096)
+	// defer clientConn.Close()
+
+	// Buffer for reading from the server
+	buffer := make([]byte, 4096)
+	// Buffer for accumulating partial messages
+	var msgBuffer []byte
+
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("Server-to-client forwarding cancelled for %s", clientAddr)
 			return
 		default:
-			if !pc.isConnectedToServer() {
+			if pc.serverConn == nil {
 				return
 			}
 
-			// Set a read deadline to prevent blocking forever
-			if err := pc.serverConn.SetReadDeadline(time.Now().Add(1 * time.Second)); err != nil {
-				log.Printf("Error setting read deadline: %v", err)
+			// Set read deadline to allow for periodic context checks
+			if err := pc.serverConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+				if !isClosedConnError(err) {
+					log.Printf("Error setting read deadline for client %s: %v", clientAddr, err)
+				}
 				return
 			}
 
-			n, err := pc.serverConn.Read(buf)
+			n, err := pc.serverConn.Read(buffer)
 			if err != nil {
 				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					// Check if context is done before continuing
-					select {
-					case <-ctx.Done():
-						return
-					default:
-						continue
-					}
+					// This is a timeout, just continue to the next iteration
+					continue
 				}
 
-				// Don't log errors if the connection was closed intentionally
 				if err != io.EOF && !isClosedConnError(err) {
 					log.Printf("Error reading from server for client %s: %v", clientAddr, err)
 				}
+
+				// Write any remaining buffered data before exiting
+				if len(msgBuffer) > 0 {
+					pc.writeToClient(clientConn, clientAddr, msgBuffer, proxy)
+				}
 				return
 			}
 
-			// Log the received message from server to client
-			proxy.logMessage("SERVER -> CLIENT", clientAddr, pc.clientPort, buf[:n])
+			// Add new data to message buffer
+			msgBuffer = append(msgBuffer, buffer[:n]...)
 
-			if _, err := clientConn.Write(buf[:n]); err != nil {
-				if !isClosedConnError(err) {
-					log.Printf("Error writing to client %s: %v", clientAddr, err)
+			// Process complete messages (ending with newline)
+			for {
+				// Find the first newline in the buffer
+				newlinePos := bytes.IndexByte(msgBuffer, '\n')
+				if newlinePos == -1 {
+					// No complete message yet, keep buffering
+					break
 				}
-				return
+
+				// Extract the complete message (including the newline)
+				msgEnd := newlinePos + 1
+				msg := make([]byte, msgEnd)
+				copy(msg, msgBuffer[:msgEnd])
+
+				// Process the complete message
+				pc.processServerMessage(clientConn, clientAddr, msg, proxy)
+
+				// Remove processed message from buffer
+				msgBuffer = msgBuffer[msgEnd:]
+			}
+
+			// If buffer is getting too large, process it as is to prevent memory issues
+			if len(msgBuffer) > 1024*1024 { // 1MB max buffer size
+				pc.processServerMessage(clientConn, clientAddr, msgBuffer, proxy)
+				msgBuffer = nil
 			}
 		}
 	}
@@ -376,7 +460,6 @@ func isClosedConnError(err error) bool {
 		return false
 	}
 
-	// Check for specific error messages that indicate a closed connection
 	str := err.Error()
 	if str == "use of closed network connection" ||
 		str == "read: connection reset by peer" ||
@@ -385,13 +468,11 @@ func isClosedConnError(err error) bool {
 		return true
 	}
 
-	// Check for net.OpError with specific error conditions
 	if opErr, ok := err.(*net.OpError); ok {
 		if opErr.Err != nil {
 			if opErr.Err.Error() == "use of closed network connection" {
 				return true
 			}
-			// Check for other common closed connection errors
 			if se, ok := opErr.Err.(*os.SyscallError); ok {
 				if se.Err == syscall.ECONNRESET || se.Err == syscall.EPIPE {
 					return true
@@ -401,6 +482,126 @@ func isClosedConnError(err error) bool {
 	}
 
 	return false
+}
+
+// shouldDisconnect checks if the connection should be disconnected due to expired timers
+func (pc *ProxyConnection) shouldDisconnect() bool {
+	pc.mutex.Lock()
+	defer pc.mutex.Unlock()
+
+	now := time.Now()
+	var remainingExpiries []time.Time
+	hasActiveTimer := false
+
+	for _, expiry := range pc.expiries {
+		if expiry.After(now) {
+			hasActiveTimer = true
+			remainingExpiries = append(remainingExpiries, expiry)
+		}
+	}
+
+	pc.expiries = remainingExpiries
+	return !hasActiveTimer
+}
+
+// ensureNewline ensures the byte slice ends with a newline
+func ensureNewline(data []byte) []byte {
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		return append(data, '\n')
+	}
+	return data
+}
+
+// forwardToProcessor sends a message to the external processor and returns the response.
+// The response is guaranteed to end with a newline.
+func (pc *ProxyConnection) forwardToProcessor(message []byte) ([]byte, error) {
+	pc.wsMutex.Lock()
+	defer pc.wsMutex.Unlock()
+
+	var err error
+	maxRetries := 2
+	var response []byte
+
+	for i := 0; i <= maxRetries; i++ {
+		// If no connection exists, create one
+		if pc.wsConn == nil {
+			log.Printf("DEBUG: Creating new WebSocket connection to processor")
+			dialer := websocket.Dialer{
+				HandshakeTimeout: 5 * time.Second,
+			}
+			conn, _, err := dialer.Dial(pc.processorCfg.URL, nil)
+			if err != nil {
+				log.Printf("ERROR: Failed to connect to processor (attempt %d/%d): %v", i+1, maxRetries+1, err)
+				if i == maxRetries {
+					return nil, fmt.Errorf("failed to connect to processor after %d attempts: %w", maxRetries+1, err)
+				}
+				time.Sleep(time.Second * time.Duration(i+1)) // Exponential backoff
+				continue
+			}
+			pc.wsConn = conn
+
+			// Set up ping/pong handlers
+			pc.wsConn.SetPingHandler(func(appData string) error {
+				err := pc.wsConn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(5*time.Second))
+				if err == websocket.ErrCloseSent {
+					return nil
+				} else if e, ok := err.(net.Error); ok && e.Timeout() {
+					return nil
+				}
+				return err
+			})
+
+			// Set read deadline
+			pc.wsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			pc.wsConn.SetPongHandler(func(string) error {
+				pc.wsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
+				return nil
+			})
+
+			log.Println("DEBUG: Successfully connected to processor")
+		}
+
+		// Send the message
+		// log.Printf("DEBUG: Sending message to processor: %s", string(message))
+		err = pc.wsConn.WriteMessage(websocket.TextMessage, message)
+		if err != nil {
+			log.Printf("ERROR: Failed to send message (attempt %d/%d): %v", i+1, maxRetries+1, err)
+			pc.wsConn.Close()
+			pc.wsConn = nil
+			if i == maxRetries {
+				return nil, fmt.Errorf("failed to send message after %d attempts: %w", maxRetries+1, err)
+			}
+			time.Sleep(time.Second * time.Duration(i+1))
+			continue
+		}
+
+		// Set a read deadline
+		if err = pc.wsConn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			log.Printf("ERROR: Failed to set read deadline: %v", err)
+			pc.wsConn.Close()
+			pc.wsConn = nil
+			return nil, fmt.Errorf("failed to set read deadline: %w", err)
+		}
+
+		// Read response
+		_, response, err = pc.wsConn.ReadMessage()
+		if err != nil {
+			log.Printf("ERROR: Failed to read response (attempt %d/%d): %v", i+1, maxRetries+1, err)
+			pc.wsConn.Close()
+			pc.wsConn = nil
+			if i == maxRetries {
+				return nil, fmt.Errorf("failed to read response after %d attempts: %w", maxRetries+1, err)
+			}
+			time.Sleep(time.Second * time.Duration(i+1))
+			continue
+		}
+
+		// log.Printf("DEBUG: Successfully received response from processor: %s", string(response))
+		// Ensure the response from the processor has a newline
+		return ensureNewline(response), nil
+	}
+
+	return nil, fmt.Errorf("unexpected error in forwardToProcessor")
 }
 
 func (p *SocketProxy) cleanupIdleConnections() {

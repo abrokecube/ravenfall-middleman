@@ -11,5 +11,9 @@
             "serverHost": "localhost",
             "serverPort": 4041
         }
-    ]
+    ],
+    "messageProcessor": {
+        "enabled": false,
+        "url": "ws://localhost:8000/process"
+    }
 }
