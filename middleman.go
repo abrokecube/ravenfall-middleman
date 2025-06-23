@@ -1001,6 +1001,8 @@ func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Timeout > 0 {
 		conn.addExpiry(time.Duration(req.Timeout) * time.Second)
+	} else {
+		conn.addExpiry(p.defaultIdleTimeout)
 	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Reconnected successfully"))
