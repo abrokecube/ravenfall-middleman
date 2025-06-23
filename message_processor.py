@@ -3,16 +3,18 @@ import json
 import logging
 import os
 import signal
-from datetime import datetime
-from dotenv import load_dotenv
+import aiohttp
 import websockets
+from typing import Dict, Any, Optional, Tuple
+from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
-HOST = os.getenv('HOST', 'localhost')
+HOST = os.getenv('HOST', '127.0.0.1')
 PORT = int(os.getenv('PORT', '8000'))
+MIDDLEMAN_API_HOST = os.getenv('MIDDLEMAN_API_HOST', 'http://127.0.0.1:8080')
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 MAX_MESSAGE_SIZE_MB = int(os.getenv('MAX_MESSAGE_SIZE_MB', '10'))  # 10MB default
 MAX_MESSAGE_SIZE = MAX_MESSAGE_SIZE_MB * 1024 * 1024  # Convert MB to bytes
@@ -36,9 +38,88 @@ def handle_sigint():
     logger.info("Shutting down server...")
     stop_event.set()
 
+async def call_middleman_api(endpoint: str, method: str = 'GET', data: Optional[Dict] = None) -> Tuple[Dict, int]:
+    """Make an API call to the middleman server."""
+    url = f"{MIDDLEMAN_API_HOST.rstrip('/')}/{endpoint.lstrip('/')}"
+    headers = {'Content-Type': 'application/json'}
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            if method.upper() == 'GET':
+                async with session.get(url, headers=headers) as response:
+                    return await response.json(), response.status
+            else:
+                async with session.post(url, json=data, headers=headers) as response:
+                    return await response.json(), response.status
+    except Exception as e:
+        logger.error(f"Error calling middleman API: {str(e)}", exc_info=DEBUG)
+        return {"error": f"Failed to connect to middleman API: {str(e)}"}, 500
+
+async def list_connections() -> Dict:
+    """List all active connections."""
+    response, status = await call_middleman_api('/api/connections')
+    return response
+
+async def force_reconnect(connection_id: str, timeout: int = 0) -> Dict:
+    """Force a reconnection for the specified connection."""
+    data = {
+        "connectionId": connection_id,
+        "timeout": timeout
+    }
+    response, status = await call_middleman_api('/api/reconnect', 'POST', data)
+    return response
+
+async def send_to_client(connection_id: str, message: str) -> Dict:
+    """Send a message to a specific client."""
+    data = {
+        "connectionId": connection_id,
+        "data": message
+    }
+    response, status = await call_middleman_api('/api/send-to-client', 'POST', data)
+    return response
+
+async def send_to_server(connection_id: str, message: str) -> Dict:
+    """Send a message to the server through a specific connection."""
+    data = {
+        "connectionId": connection_id,
+        "data": message
+    }
+    response, status = await call_middleman_api('/api/send-to-server', 'POST', data)
+    return response
+
+
+async def send_and_wait_response(connection_id: str, message: str, correlation_id: str = "", timeout: int = 30) -> Dict:
+    """
+    Send a message to the server and wait for a response with the given correlation ID.
+    
+    Args:
+        connection_id: The connection ID to send the message through
+        message: The message to send to the server
+        correlation_id: Optional correlation ID to match the response. If not provided, one will be generated.
+        timeout: Maximum time in seconds to wait for a response (default: 30)
+        
+    Returns:
+        Dict containing the response data or error information
+    """
+    data = {
+        "connectionId": connection_id,
+        "data": message,
+        "timeout": timeout
+    }
+    
+    if correlation_id:
+        data["correlationId"] = correlation_id
+        
+    response, status = await call_middleman_api('/api/send-and-wait-response', 'POST', data)
+    return response
+
 async def process_message(message: str) -> str:
     """
     Process an incoming message and return a response.
+    
+    To block a message, return a dictionary with {"block": True}
+    To modify a message, return a dictionary with {"message": "modified message"}
+    To allow the message through unmodified, return an empty dictionary or None
     
     Args:
         message: The incoming message as a string (expected to be JSON)

@@ -2,6 +2,7 @@
     "enableMessageLogging": true,
     "defaultTimeoutSeconds": 15,
     "noIdentifierTimeoutSeconds": 5,
+    "apiPort": 8080,
     "identifier_timeouts": {
         "island_info": 30
     },

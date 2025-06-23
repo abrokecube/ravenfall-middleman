@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"strconv"
 	"sync"
@@ -22,10 +24,32 @@ type ClientMessage struct {
 	Identifier string `json:"Identifier"`
 }
 
+type ServerMessage struct {
+	Identifier    string `json:"Identifier"`
+	CorrelationID string `json:"CorrelationId"`
+}
+
 // ServerConfig holds the configuration for a target server.
 type ServerConfig struct {
 	Host string
 	Port int
+}
+
+// APIRequest defines the structure for API requests.
+type APIRequest struct {
+	ConnectionID  string `json:"connectionId"`
+	Data          string `json:"data"`
+	Timeout       int    `json:"timeout"`
+	ExpectedCount int    `json:"expectedCount"` // Number of expected responses (0 = single response)
+}
+
+// ResponseCollector holds the collected responses
+type ResponseCollector struct {
+	Responses []string
+	Count     int
+	Expected  int
+	Complete  bool
+	Ch        chan struct{} // Closed when complete
 }
 
 // MessageProcessorConfig holds the configuration for the message processor.
@@ -40,6 +64,7 @@ type Config struct {
 	DefaultTimeoutSeconds      int            `json:"defaultTimeoutSeconds"`
 	NoIdentifierTimeoutSeconds int            `json:"noIdentifierTimeoutSeconds"`
 	IdentifierTimeouts         map[string]int `json:"identifier_timeouts"`
+	APIPort                    int            `json:"apiPort"`
 	ProxyMappings              []struct {
 		ClientPort int    `json:"clientPort"`
 		ServerHost string `json:"serverHost"`
@@ -85,16 +110,26 @@ type ProxyConnection struct {
 }
 
 // SocketProxy manages all proxy connections.
+// usedCorrelationID tracks when a correlation ID was marked as used
+type usedCorrelationID struct {
+	timestamp time.Time
+}
+
 type SocketProxy struct {
 	connections          map[string]*ProxyConnection
 	listeners            map[int]net.Listener
-	connMutex            sync.Mutex
+	listenerMutex        sync.Mutex // Protects the listeners map
+	connMutex            sync.Mutex // Protects the connections map
 	mappings             map[int]ServerConfig
 	defaultIdleTimeout   time.Duration
 	noIdentifierTimeout  time.Duration
 	identifierTimeouts   map[string]time.Duration
 	enableMessageLogging bool
 	processorCfg         MessageProcessorConfig
+	responseChannels     map[string]*ResponseCollector
+	responseMutex        sync.Mutex
+	usedCorrelationIDs   map[string]usedCorrelationID
+	usedIDsMutex         sync.RWMutex
 }
 
 // NewSocketProxy creates a new SocketProxy.
@@ -119,6 +154,11 @@ func (p *SocketProxy) logMessage(direction, clientAddr string, clientPort int, d
 }
 
 func NewSocketProxy(config *Config) *SocketProxy {
+	// Set default API port if not specified
+	if config.APIPort == 0 {
+		config.APIPort = 8080
+	}
+
 	mappings := make(map[int]ServerConfig)
 	for _, mapping := range config.ProxyMappings {
 		mappings[mapping.ClientPort] = ServerConfig{
@@ -136,7 +176,7 @@ func NewSocketProxy(config *Config) *SocketProxy {
 
 	noIdentifierTimeout := time.Duration(config.NoIdentifierTimeoutSeconds) * time.Second
 
-	return &SocketProxy{
+	proxy := &SocketProxy{
 		connections:          make(map[string]*ProxyConnection),
 		listeners:            make(map[int]net.Listener),
 		mappings:             mappings,
@@ -145,12 +185,26 @@ func NewSocketProxy(config *Config) *SocketProxy {
 		identifierTimeouts:   identifierTimeouts,
 		enableMessageLogging: config.EnableMessageLogging,
 		processorCfg:         config.MessageProcessor,
+		responseChannels:     make(map[string]*ResponseCollector),
+		usedCorrelationIDs:   make(map[string]usedCorrelationID),
 	}
+
+	// Start the cleanup goroutine for old correlation IDs (clean up every hour, keep IDs for 1 hour)
+	proxy.startCorrelationIDCleanup(1*time.Hour, 1*time.Hour)
+
+	return proxy
 }
 
 // Start initializes and starts all proxy servers.
 func (p *SocketProxy) Start() {
 	log.Println("Starting socket proxy...")
+
+	// Initialize the listeners map if it's nil
+	p.listenerMutex.Lock()
+	if p.listeners == nil {
+		p.listeners = make(map[int]net.Listener)
+	}
+	p.listenerMutex.Unlock()
 
 	for clientPort, serverConfig := range p.mappings {
 		go func(port int, config ServerConfig) {
@@ -160,21 +214,30 @@ func (p *SocketProxy) Start() {
 				log.Printf("Failed to start server on port %d: %v", port, err)
 				return
 			}
+
+			// Store the listener with mutex protection
+			p.listenerMutex.Lock()
 			p.listeners[port] = listener
+			p.listenerMutex.Unlock()
+
 			log.Printf("Proxy listening on port %d -> %s:%d", port, config.Host, config.Port)
 
 			for {
 				clientConn, err := listener.Accept()
 				if err != nil {
-					log.Printf("Failed to accept client connection on port %d: %v", port, err)
-					// Check if the listener was closed
-					if _, ok := p.listeners[port]; !ok {
+					if isClosedConnError(err) {
 						break
 					}
+					log.Printf("Failed to accept client connection on port %d: %v", port, err)
 					continue
 				}
 				go p.handleClient(clientConn, port, config)
 			}
+
+			// Clean up the listener from the map when done
+			p.listenerMutex.Lock()
+			delete(p.listeners, port)
+			p.listenerMutex.Unlock()
 		}(clientPort, serverConfig)
 	}
 
@@ -186,8 +249,8 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 	clientAddr := clientConn.RemoteAddr().String()
 	log.Printf("Client %s connected to port %d", clientAddr, clientPort)
 
-	// Generate a unique connection ID
-	connectionID := fmt.Sprintf("%s_%d_%d", clientConn.RemoteAddr().String(), clientPort, time.Now().UnixNano())
+	// Generate a connection ID using remote address, client port, and server port
+	connectionID := fmt.Sprintf("%s_%d_%d", serverConfig.Host, clientPort, serverConfig.Port)
 
 	proxyConn := &ProxyConnection{
 		connectionID: connectionID,
@@ -202,6 +265,9 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 
 	// Store the connection in the proxy's connection map
 	p.connMutex.Lock()
+	if p.connections == nil {
+		p.connections = make(map[string]*ProxyConnection)
+	}
 	p.connections[connectionID] = proxyConn
 	p.connMutex.Unlock()
 
@@ -268,11 +334,15 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		processedData := buf[:n]
 		if proxyConn.processorCfg.Enabled {
 			// log.Printf("DEBUG: Sending to processor: %s", string(processedData))
-			processedResponse, err := proxyConn.forwardToProcessor(processedData, "client")
+			processedResponse, blocked, err := proxyConn.forwardToProcessor(processedData, "client")
 			if err != nil {
 				log.Printf("Error processing message: %v. Forwarding original message.", err)
 				// Keep the original message if there was an error
 				processedData = buf[:n]
+			} else if blocked {
+				log.Printf("Message blocked by processor")
+				// Skip sending this message to the server and continue to the next message
+				continue
 			} else {
 				// Only use the processed data if we got a valid response
 				if len(processedResponse) > 0 {
@@ -366,21 +436,78 @@ func (pc *ProxyConnection) writeToClient(conn net.Conn, clientAddr string, data 
 }
 
 // processServerMessage processes a complete message from the server
-func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, clientAddr string, message []byte, proxy *SocketProxy) {
+func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []byte, proxy *SocketProxy) {
 	if len(message) == 0 {
 		return
 	}
 
+	// Log the received message
+	if proxy.enableMessageLogging {
+		proxy.logMessage("SERVER -> CLIENT", clientConn.RemoteAddr().String(), pc.clientPort, message)
+	}
+
+	// Parse the message as JSON to check for both Identifier and CorrelationID
+	var msg ServerMessage
+	if err := json.Unmarshal(message, &msg); err == nil {
+		// Handle Identifier for expiry
+		if msg.Identifier != "" {
+			if timeout, ok := proxy.identifierTimeouts[msg.Identifier]; ok {
+				pc.addExpiry(timeout)
+			} else {
+				pc.addExpiry(proxy.defaultIdleTimeout)
+			}
+		} else {
+			// If no identifier, use the no-identifier timeout
+			pc.addExpiry(proxy.noIdentifierTimeout)
+		}
+
+		// Handle CorrelationID for response tracking
+		if correlationID := msg.CorrelationID; correlationID != "" {
+			// First check if this correlation ID has already been used
+			if proxy.isCorrelationIDUsed(correlationID) {
+				log.Printf("Dropping message with used correlation ID: %s", correlationID)
+				return // Don't forward to client
+			}
+
+			// Check if there's a waiting collector for this correlation ID
+			if collector, exists := proxy.getExistingCollector(correlationID); exists && !collector.Complete {
+				// Add to responses
+				collector.Responses = append(collector.Responses, string(message))
+				collector.Count++
+
+				// Check if we've received all expected responses
+				if collector.Expected > 0 && collector.Count >= collector.Expected {
+					collector.Complete = true
+					close(collector.Ch)
+					proxy.cleanupResponseChannel(correlationID)
+				} else if collector.Expected == 0 {
+					// If expected count is 0, treat as single response
+					collector.Complete = true
+					close(collector.Ch)
+					proxy.cleanupResponseChannel(correlationID)
+				}
+				return // Don't forward to client
+			}
+		}
+	}
+
 	// If message processor is enabled, forward through it
 	if pc.processorCfg.Enabled {
-		processed, err := pc.forwardToProcessor(message, "server")
+		processed, blocked, err := pc.forwardToProcessor(message, "server")
 		if err != nil {
 			log.Printf("Error processing message: %v, falling back to direct forwarding", err)
 			// Fall back to direct forwarding on error
 			_, _ = clientConn.Write(message)
 			return
+		} else if blocked {
+			log.Printf("Message blocked by processor")
+			return
+		} else {
+			// Only update message if we got a new one
+			if len(processed) > 0 {
+				message = processed
+			}
 		}
-		message = processed
 	}
 
 	// Forward the (possibly processed) message to the client
@@ -449,7 +576,7 @@ func (pc *ProxyConnection) forwardServerToClient(clientConn net.Conn, clientAddr
 				copy(msg, msgBuffer[:msgEnd])
 
 				// Process the complete message
-				pc.processServerMessage(clientConn, clientAddr, msg, proxy)
+				pc.processServerMessage(clientConn, msg, proxy)
 
 				// Remove processed message from buffer
 				msgBuffer = msgBuffer[msgEnd:]
@@ -457,11 +584,22 @@ func (pc *ProxyConnection) forwardServerToClient(clientConn net.Conn, clientAddr
 
 			// If buffer is getting too large, process it as is to prevent memory issues
 			if len(msgBuffer) > 1024*1024 { // 1MB max buffer size
-				pc.processServerMessage(clientConn, clientAddr, msgBuffer, proxy)
+				pc.processServerMessage(clientConn, msgBuffer, proxy)
 				msgBuffer = nil
 			}
 		}
 	}
+}
+
+// generateCorrelationID creates a unique ID for correlating requests and responses
+func generateCorrelationID() string {
+	timestamp := time.Now().UnixNano()
+	randBytes := make([]byte, 4)
+	if _, err := rand.Read(randBytes); err != nil {
+		// Fallback to using timestamp only if we can't generate random bytes
+		return fmt.Sprintf("%x", timestamp)
+	}
+	return fmt.Sprintf("%x-%x", timestamp, randBytes)
 }
 
 // isClosedConnError reports whether err is an error from use of a closed network connection.
@@ -533,10 +671,21 @@ type MessageWrapper struct {
 	Message      json.RawMessage `json:"message"`       // The original message
 }
 
+// ProcessorResponse represents the response from the message processor
+type ProcessorResponse struct {
+	Block   bool            `json:"block"`   // If true, the message should be blocked
+	Message json.RawMessage `json:"message"` // The processed message (if not blocked)
+}
+
 // forwardToProcessor sends a message to the external processor and returns the response.
-// The response is guaranteed to end with a newline.
+// If the processor returns with block=true, the message will be blocked and not forwarded.
+// The response is guaranteed to end with a newline if not blocked.
 // source indicates where the message originated from ("client" or "server")
-func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]byte, error) {
+// Returns:
+//   - processed message (if not blocked)
+//   - error if processing failed
+//   - bool indicating if the message should be blocked
+func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]byte, bool, error) {
 	// Get the current timestamp in ISO 8601 format
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 
@@ -566,7 +715,7 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 	defer pc.wsMutex.Unlock()
 
 	var err error
-	maxRetries := 2
+	maxRetries := 0
 	var response []byte
 
 	for i := 0; i <= maxRetries; i++ {
@@ -580,9 +729,9 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 			if err != nil {
 				log.Printf("ERROR: Failed to connect to processor (attempt %d/%d): %v", i+1, maxRetries+1, err)
 				if i == maxRetries {
-					return nil, fmt.Errorf("failed to connect to processor after %d attempts: %w", maxRetries+1, err)
+					return nil, true, fmt.Errorf("failed to connect to processor after %d attempts: %w", maxRetries+1, err)
 				}
-				time.Sleep(time.Second * time.Duration(i+1)) // Exponential backoff
+				time.Sleep(time.Second * time.Duration(1))
 				continue
 			}
 			pc.wsConn = conn
@@ -623,7 +772,7 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 		messageData, err = json.Marshal(msgWrapper)
 		if err != nil {
 			log.Printf("ERROR: Failed to marshal message wrapper: %v", err)
-			return nil, fmt.Errorf("failed to marshal message wrapper: %w", err)
+			return nil, true, fmt.Errorf("failed to marshal message wrapper: %w", err)
 		}
 
 		// Send the message
@@ -634,9 +783,9 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 			pc.wsConn.Close()
 			pc.wsConn = nil
 			if i == maxRetries {
-				return nil, fmt.Errorf("failed to send message after %d attempts: %w", maxRetries+1, err)
+				return nil, true, fmt.Errorf("failed to send message after %d attempts: %w", maxRetries+1, err)
 			}
-			time.Sleep(time.Second * time.Duration(i+1))
+			time.Sleep(time.Second * time.Duration(1))
 			continue
 		}
 
@@ -645,7 +794,7 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 			log.Printf("ERROR: Failed to set read deadline: %v", err)
 			pc.wsConn.Close()
 			pc.wsConn = nil
-			return nil, fmt.Errorf("failed to set read deadline: %w", err)
+			return nil, false, fmt.Errorf("failed to set read deadline: %w", err)
 		}
 
 		// Read response
@@ -655,18 +804,37 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 			pc.wsConn.Close()
 			pc.wsConn = nil
 			if i == maxRetries {
-				return nil, fmt.Errorf("failed to read response after %d attempts: %w", maxRetries+1, err)
+				return nil, false, fmt.Errorf("failed to read response after %d attempts: %w", maxRetries+1, err)
 			}
-			time.Sleep(time.Second * time.Duration(i+1))
+			time.Sleep(time.Second * time.Duration(1))
 			continue
 		}
 
 		// log.Printf("DEBUG: Successfully received response from processor: %s", string(response))
-		// Ensure the response from the processor has a newline
-		return ensureNewline(response), nil
+
+		// Parse the processor response
+		var procResp ProcessorResponse
+		if err := json.Unmarshal(response, &procResp); err != nil {
+			log.Printf("ERROR: Failed to parse processor response: %v", err)
+			return nil, false, fmt.Errorf("failed to parse processor response: %w", err)
+		}
+
+		// If message should be blocked, return empty response with block=true
+		if procResp.Block {
+			log.Printf("DEBUG: Message blocked by processor")
+			return nil, true, nil
+		}
+
+		// If no message returned, use the original message
+		if len(procResp.Message) == 0 {
+			return ensureNewline(message), false, nil
+		}
+
+		// Return the processed message with newline
+		return ensureNewline(procResp.Message), false, nil
 	}
 
-	return nil, fmt.Errorf("unexpected error in forwardToProcessor")
+	return nil, false, fmt.Errorf("unexpected error in forwardToProcessor")
 }
 
 func (p *SocketProxy) cleanupIdleConnections() {
@@ -687,11 +855,315 @@ func (p *SocketProxy) cleanupIdleConnections() {
 
 func (p *SocketProxy) Stop() {
 	log.Println("Stopping socket proxy...")
+
+	// Create a copy of the listeners map to avoid holding the lock while closing
+	p.listenerMutex.Lock()
+	listenersCopy := make(map[int]net.Listener, len(p.listeners))
 	for port, listener := range p.listeners {
-		listener.Close()
-		delete(p.listeners, port)
+		listenersCopy[port] = listener
 	}
+	p.listeners = make(map[int]net.Listener) // Clear the map while holding the lock
+	p.listenerMutex.Unlock()
+
+	// Close all listeners
+	for port, listener := range listenersCopy {
+		log.Printf("Closing listener on port %d", port)
+		if err := listener.Close(); err != nil {
+			log.Printf("Error closing listener on port %d: %v", port, err)
+		}
+	}
+
 	log.Println("Socket proxy stopped")
+}
+
+// getResponseCollector creates a new response collector for a correlation ID
+func (p *SocketProxy) getResponseCollector(correlationID string, expectedCount int) *ResponseCollector {
+	p.responseMutex.Lock()
+	defer p.responseMutex.Unlock()
+
+	if p.responseChannels == nil {
+		p.responseChannels = make(map[string]*ResponseCollector)
+	}
+
+	collector := &ResponseCollector{
+		Expected:  expectedCount,
+		Ch:        make(chan struct{}),
+		Responses: []string{},
+	}
+
+	p.responseChannels[correlationID] = collector
+	return collector
+}
+
+// getExistingCollector gets an existing response collector if it exists
+func (p *SocketProxy) getExistingCollector(correlationID string) (*ResponseCollector, bool) {
+	p.responseMutex.Lock()
+	defer p.responseMutex.Unlock()
+
+	if collector, exists := p.responseChannels[correlationID]; exists {
+		return collector, true
+	}
+	return nil, false
+}
+
+// cleanupResponseChannel removes a response collector when it's no longer needed
+// isCorrelationIDUsed checks if a correlation ID has already been used
+func (p *SocketProxy) isCorrelationIDUsed(correlationID string) bool {
+	p.usedIDsMutex.RLock()
+	defer p.usedIDsMutex.RUnlock()
+	_, exists := p.usedCorrelationIDs[correlationID]
+	return exists
+}
+
+// markCorrelationIDUsed marks a correlation ID as used with the current timestamp
+func (p *SocketProxy) markCorrelationIDUsed(correlationID string) {
+	p.usedIDsMutex.Lock()
+	defer p.usedIDsMutex.Unlock()
+
+	if p.usedCorrelationIDs == nil {
+		p.usedCorrelationIDs = make(map[string]usedCorrelationID)
+	}
+	p.usedCorrelationIDs[correlationID] = usedCorrelationID{
+		timestamp: time.Now(),
+	}
+}
+
+// cleanupOldCorrelationIDs removes correlation IDs that are older than maxAge
+func (p *SocketProxy) cleanupOldCorrelationIDs(maxAge time.Duration) {
+	p.usedIDsMutex.Lock()
+	defer p.usedIDsMutex.Unlock()
+
+	if p.usedCorrelationIDs == nil {
+		return
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	for id, entry := range p.usedCorrelationIDs {
+		if entry.timestamp.Before(cutoff) {
+			delete(p.usedCorrelationIDs, id)
+		}
+	}
+}
+
+// startCorrelationIDCleanup starts a background goroutine to clean up old correlation IDs
+func (p *SocketProxy) startCorrelationIDCleanup(cleanupInterval, keepDuration time.Duration) {
+	go func() {
+		ticker := time.NewTicker(cleanupInterval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			p.cleanupOldCorrelationIDs(keepDuration)
+		}
+	}()
+}
+
+func (p *SocketProxy) cleanupResponseChannel(correlationID string) {
+	p.responseMutex.Lock()
+	defer p.responseMutex.Unlock()
+
+	if collector, exists := p.responseChannels[correlationID]; exists {
+		if !collector.Complete {
+			close(collector.Ch)
+		}
+		delete(p.responseChannels, correlationID)
+
+		// Mark this correlation ID as used
+		p.markCorrelationIDUsed(correlationID)
+	}
+}
+
+func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST method is accepted", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req APIRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	p.connMutex.Lock()
+	conn, ok := p.connections[req.ConnectionID]
+	p.connMutex.Unlock()
+
+	if !ok {
+		http.Error(w, "Connection not found", http.StatusNotFound)
+		return
+	}
+
+	log.Printf("API: Forcing reconnect for %s", req.ConnectionID)
+	conn.disconnectFromServer()
+	if !conn.connectToServer() {
+		http.Error(w, "Failed to reconnect to server", http.StatusInternalServerError)
+		return
+	}
+	if req.Timeout > 0 {
+		conn.addExpiry(time.Duration(req.Timeout) * time.Second)
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Reconnected successfully"))
+}
+
+func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST method is accepted", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req APIRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	p.connMutex.Lock()
+	conn, ok := p.connections[req.ConnectionID]
+	p.connMutex.Unlock()
+
+	if !ok {
+		http.Error(w, "Connection not found", http.StatusNotFound)
+		return
+	}
+
+	log.Printf("API: Sending message to client %s", req.ConnectionID)
+	if err := conn.writeToClient(conn.clientConn, conn.clientConn.RemoteAddr().String(), []byte(req.Data), p); err != nil {
+		http.Error(w, "Failed to send message to client", http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Message sent to client"))
+}
+
+func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST method is accepted", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req APIRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	p.connMutex.Lock()
+	conn, ok := p.connections[req.ConnectionID]
+	p.connMutex.Unlock()
+
+	if !ok {
+		http.Error(w, "Connection not found", http.StatusNotFound)
+		return
+	}
+
+	log.Printf("API: Sending message to server for %s", req.ConnectionID)
+	if !conn.isConnectedToServer() {
+		log.Printf("API: Server disconnected, attempting to reconnect for %s", req.ConnectionID)
+		if !conn.connectToServer() {
+			http.Error(w, "Failed to reconnect to server", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	conn.mutex.Lock()
+	defer conn.mutex.Unlock()
+	if _, err := conn.serverConn.Write(ensureNewline([]byte(req.Data))); err != nil {
+		http.Error(w, "Failed to send message to server", http.StatusInternalServerError)
+		return
+	}
+	p.logMessage("sent-by-api", conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Message sent to server"))
+}
+
+func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Only POST method is accepted", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req APIRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// Generate a new correlation ID
+	correlationID := generateCorrelationID()
+
+	// Set default values
+	if req.ExpectedCount < 0 {
+		req.ExpectedCount = 0 // Default to single response
+	}
+
+	timeout := time.Duration(30) * time.Second // Default timeout
+	if req.Timeout > 0 {
+		timeout = time.Duration(req.Timeout) * time.Second
+	}
+
+	// Get the connection
+	p.connMutex.Lock()
+	conn, exists := p.connections[req.ConnectionID]
+	p.connMutex.Unlock()
+
+	if !exists {
+		http.Error(w, "Connection not found", http.StatusNotFound)
+		return
+	}
+
+	// Create response collector
+	collector := p.getResponseCollector(correlationID, req.ExpectedCount)
+	defer p.cleanupResponseChannel(correlationID)
+
+	// Send the message to the server
+	if !conn.isConnectedToServer() {
+		log.Printf("API: Server disconnected, attempting to reconnect for %s", req.ConnectionID)
+		if !conn.connectToServer() {
+			http.Error(w, "Failed to reconnect to server", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	conn.mutex.Lock()
+	_, err := conn.serverConn.Write(ensureNewline([]byte(req.Data)))
+	conn.mutex.Unlock()
+
+	if err != nil {
+		http.Error(w, "Failed to send message to server", http.StatusInternalServerError)
+		return
+	}
+
+	p.logMessage("sent-by-api-waiting", conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
+
+	// Wait for response(s) with timeout
+	select {
+	case <-collector.Ch:
+		// All expected responses received or single response if ExpectedCount was 0
+		response := map[string]interface{}{
+			"correlationId": correlationID,
+			"responses":     collector.Responses,
+			"complete":      collector.Complete,
+			"count":         collector.Count,
+			"expectedCount": req.ExpectedCount,
+			"timeout":       false,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+
+	case <-time.After(timeout):
+		// Return whatever we have so far
+		response := map[string]interface{}{
+			"correlationId": correlationID,
+			"responses":     collector.Responses,
+			"complete":      false,
+			"count":         collector.Count,
+			"expectedCount": req.ExpectedCount,
+			"timeout":       true,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}
 }
 
 func main() {
@@ -701,6 +1173,20 @@ func main() {
 	}
 
 	proxy := NewSocketProxy(config)
+
+	// Set up the API endpoints
+	http.HandleFunc("/api/reconnect", proxy.handleReconnect)
+	http.HandleFunc("/api/send-to-client", proxy.handleSendToClient)
+	http.HandleFunc("/api/send-to-server", proxy.handleSendToServer)
+	http.HandleFunc("/api/send-and-wait-response", proxy.handleSendAndWaitResponse)
+	apiAddr := fmt.Sprintf(":%d", config.APIPort)
+	go func() {
+		log.Printf("Starting API server on %s", apiAddr)
+		if err := http.ListenAndServe(apiAddr, nil); err != nil {
+			log.Fatalf("Failed to start API server: %v", err)
+		}
+	}()
+
 	proxy.Start()
 
 	// Block forever
