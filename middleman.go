@@ -273,6 +273,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 
 	defer func() {
 		proxyConn.disconnectFromServer()
+		proxyConn.disconnectFromMessageProcessor()
 		p.connMutex.Lock()
 		delete(p.connections, connectionID)
 		p.connMutex.Unlock()
@@ -391,14 +392,19 @@ func (pc *ProxyConnection) disconnectFromServer() {
 		pc.serverConn.Close()
 		pc.serverConn = nil
 	}
+}
+
+func (pc *ProxyConnection) disconnectFromMessageProcessor() {
+	pc.wsMutex.Lock()
+	defer pc.wsMutex.Unlock()
+
 	if pc.cancelForward != nil {
 		pc.cancelForward()
 		pc.cancelForward = nil
 	}
 
-	pc.wsMutex.Lock()
-	defer pc.wsMutex.Unlock()
 	if pc.wsConn != nil {
+		log.Printf("Disconnecting from message processor for %s", pc.connectionID)
 		pc.wsConn.Close()
 		pc.wsConn = nil
 	}
