@@ -1,0 +1,38 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"net/http"
+)
+
+func main() {
+	config, err := loadConfig("config.json")
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+
+	proxy := NewSocketProxy(config)
+
+	// Set up the API endpoints
+	http.HandleFunc("/api/reconnect", proxy.handleReconnect)
+	http.HandleFunc("/api/send-to-client", proxy.handleSendToClient)
+	http.HandleFunc("/api/send-to-server", proxy.handleSendToServer)
+	http.HandleFunc("/api/send-and-wait-response", proxy.handleSendAndWaitResponse)
+	// Add WebSocket endpoint for message streaming
+	http.HandleFunc("/ws", handleWebSocket)
+
+	apiAddr := fmt.Sprintf(":%d", config.APIPort)
+	go func() {
+		log.Printf("Starting API server on %s", apiAddr)
+		log.Printf("WebSocket endpoint available at ws://localhost%s/ws", apiAddr)
+		if err := http.ListenAndServe(apiAddr, nil); err != nil {
+			log.Fatalf("Failed to start API server: %v", err)
+		}
+	}()
+
+	proxy.Start()
+
+	// Block forever
+	select {}
+}
