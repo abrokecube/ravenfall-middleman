@@ -165,7 +165,6 @@ func (pc *ProxyConnection) writeToClient(conn net.Conn, clientAddr string, data 
 	}
 
 	// Log the message being sent to the client
-	proxy.logMessage("SERVER -> CLIENT", clientAddr, pc.clientPort, data)
 
 	// Write the data to the client
 	_, err := conn.Write(data)
@@ -182,7 +181,7 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []b
 	}
 
 	// Log the received message
-	proxy.logMessage("SERVER -> CLIENT", clientConn.RemoteAddr().String(), pc.clientPort, message)
+	proxy.logMessage("SERVER", clientConn.RemoteAddr().String(), pc.clientPort, message)
 
 	// Parse the message as JSON to check for both Identifier and CorrelationID
 	var msg ServerMessage
@@ -291,6 +290,7 @@ func (pc *ProxyConnection) forwardServerToClient(clientConn net.Conn, clientAddr
 
 				// Write any remaining buffered data before exiting
 				if len(msgBuffer) > 0 {
+					proxy.logMessage("SERVER", clientAddr, pc.clientPort, msgBuffer)
 					pc.writeToClient(clientConn, clientAddr, msgBuffer, proxy)
 				}
 				return

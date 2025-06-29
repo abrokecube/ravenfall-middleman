@@ -34,9 +34,9 @@ type SocketProxy struct {
 
 // NewSocketProxy creates a new SocketProxy.
 // broadcastMessageToClients sends the message to all connected WebSocket clients
-func (p *SocketProxy) broadcastMessageToClients(direction, clientAddr string, clientPort int, data []byte) {
+func (p *SocketProxy) broadcastMessageToClients(source, clientAddr string, clientPort int, data []byte) {
 	msg := MessageWrapper{
-		Source:       direction,
+		Source:       source,
 		ClientAddr:   clientAddr,
 		ServerAddr:   fmt.Sprintf("localhost:%d", clientPort),
 		ConnectionID: fmt.Sprintf("%s_%d", clientAddr, clientPort),
@@ -52,9 +52,9 @@ func (p *SocketProxy) broadcastMessageToClients(direction, clientAddr string, cl
 }
 
 // logMessage formats and logs a message with its direction and connection info
-func (p *SocketProxy) logMessage(direction, clientAddr string, clientPort int, data []byte) {
+func (p *SocketProxy) logMessage(source, clientAddr string, clientPort int, data []byte) {
 	// Always broadcast the message to WebSocket clients, regardless of logging setting
-	p.broadcastMessageToClients(direction, clientAddr, clientPort, data)
+	p.broadcastMessageToClients(source, clientAddr, clientPort, data)
 
 	if !p.enableMessageLogging {
 		return
@@ -71,7 +71,7 @@ func (p *SocketProxy) logMessage(direction, clientAddr string, clientPort int, d
 		message = prettyJSON.String()
 	}
 
-	log.Printf("[%s] %s:%d\n%s\n", direction, clientAddr, clientPort, message)
+	log.Printf("[from %s] %s:%d\n%s\n", source, clientAddr, clientPort, message)
 }
 
 func NewSocketProxy(config *Config) *SocketProxy {
@@ -222,7 +222,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		}
 
 		// Log the received message
-		p.logMessage("CLIENT -> SERVER", clientAddr, clientPort, buf[:n])
+		p.logMessage("CLIENT", clientAddr, clientPort, buf[:n])
 
 		var msg ClientMessage
 		parsedWithIdentifier := false
@@ -482,6 +482,7 @@ func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Failed to send message to client", http.StatusInternalServerError)
 		return
 	}
+	p.logMessage("API-SERVER", conn.clientConn.RemoteAddr().String(), conn.clientPort, []byte(req.Data))
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Message sent to client"))
 }
@@ -522,7 +523,7 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Failed to send message to server", http.StatusInternalServerError)
 		return
 	}
-	p.logMessage("sent-by-api", conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
+	p.logMessage("API-CLIENT", conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("Message sent to server"))
 }
@@ -584,7 +585,7 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	p.logMessage("sent-by-api-waiting", conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
+	p.logMessage("API-CLIENT", conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
 
 	// Wait for response(s) with timeout
 	select {
