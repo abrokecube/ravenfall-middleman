@@ -34,12 +34,18 @@ type SocketProxy struct {
 
 // NewSocketProxy creates a new SocketProxy.
 // broadcastMessageToClients sends the message to all connected WebSocket clients
-func (p *SocketProxy) broadcastMessageToClients(source, clientAddr string, clientPort int, data []byte) {
+func (p *SocketProxy) broadcastMessageToClients(source, clientAddr string, clientPort, serverPort int, data []byte) {
+	// Extract just the IP address from the client address
+	clientIP := clientAddr
+	if host, _, err := net.SplitHostPort(clientAddr); err == nil {
+		clientIP = host
+	}
+
 	msg := MessageWrapper{
 		Source:       source,
 		ClientAddr:   clientAddr,
-		ServerAddr:   fmt.Sprintf("localhost:%d", clientPort),
-		ConnectionID: fmt.Sprintf("%s_%d", clientAddr, clientPort),
+		ServerAddr:   fmt.Sprintf("localhost:%d", serverPort),
+		ConnectionID: fmt.Sprintf("%s_%d_%d", clientIP, clientPort, serverPort),
 		Timestamp:    time.Now().Format(time.RFC3339),
 		Message:      json.RawMessage(data),
 	}
@@ -54,7 +60,20 @@ func (p *SocketProxy) broadcastMessageToClients(source, clientAddr string, clien
 // logMessage formats and logs a message with its direction and connection info
 func (p *SocketProxy) logMessage(source, clientAddr string, clientPort int, data []byte) {
 	// Always broadcast the message to WebSocket clients, regardless of logging setting
-	p.broadcastMessageToClients(source, clientAddr, clientPort, data)
+	// We need to find the connection to get the server port
+	p.connMutex.Lock()
+	defer p.connMutex.Unlock()
+	
+	// Try to find a matching connection to get the server port
+	serverPort := 0 // Default to 0 if we can't find the connection
+	for _, conn := range p.connections {
+		if conn.clientConn.RemoteAddr().String() == clientAddr && conn.clientPort == clientPort {
+			serverPort = conn.serverConfig.Port
+			break
+		}
+	}
+	
+	p.broadcastMessageToClients(source, clientAddr, clientPort, serverPort, data)
 
 	if !p.enableMessageLogging {
 		return
