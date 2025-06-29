@@ -439,15 +439,32 @@ func (p *SocketProxy) cleanupResponseChannel(correlationID string) {
 	}
 }
 
+// sendJSONResponse sends a JSON response with the given status code and data
+func sendJSONResponse(w http.ResponseWriter, statusCode int, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+// sendErrorResponse sends a JSON error response
+func sendErrorResponse(w http.ResponseWriter, statusCode int, message string) {
+	sendJSONResponse(w, statusCode, map[string]interface{}{
+		"success": false,
+		"error":   message,
+	})
+}
+
 func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Only POST method is accepted", http.StatusMethodNotAllowed)
+		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is accepted")
 		return
 	}
 
 	var req APIRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
@@ -456,14 +473,14 @@ func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	p.connMutex.Unlock()
 
 	if !ok {
-		http.Error(w, "Connection not found", http.StatusNotFound)
+		sendErrorResponse(w, http.StatusNotFound, "Connection not found")
 		return
 	}
 
 	log.Printf("API: Forcing reconnect for %s", req.ConnectionID)
 	conn.disconnectFromServer()
 	if !conn.connectToServer() {
-		http.Error(w, "Failed to reconnect to server", http.StatusInternalServerError)
+		sendErrorResponse(w, http.StatusInternalServerError, "Failed to reconnect to server")
 		return
 	}
 	if req.Timeout > 0 {
@@ -471,19 +488,26 @@ func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	} else {
 		conn.addExpiry(p.defaultIdleTimeout)
 	}
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Reconnected successfully"))
+	
+	response := map[string]interface{}{
+		"success": true,
+		"message": "Reconnected successfully",
+	}
+	sendJSONResponse(w, http.StatusOK, response)
 }
 
-func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request) {
+// handleEnsureConnected ensures the connection to the server is active.
+// If the connection is not active, it will attempt to reconnect.
+// If the connection is already active, it will remain connected.
+func (p *SocketProxy) handleEnsureConnected(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Only POST method is accepted", http.StatusMethodNotAllowed)
+		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is accepted")
 		return
 	}
 
 	var req APIRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
@@ -492,29 +516,81 @@ func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request)
 	p.connMutex.Unlock()
 
 	if !ok {
-		http.Error(w, "Connection not found", http.StatusNotFound)
+		sendErrorResponse(w, http.StatusNotFound, "Connection not found")
+		return
+	}
+
+	// Check if we need to reconnect
+	reconnected := false
+	if !conn.isConnectedToServer() {
+		log.Printf("API: Server disconnected, attempting to reconnect for %s", req.ConnectionID)
+		if !conn.connectToServer() {
+			sendErrorResponse(w, http.StatusInternalServerError, "Failed to reconnect to server")
+			return
+		}
+		reconnected = true
+	}
+
+	// Update the connection timeout if specified
+	if req.Timeout > 0 {
+		conn.addExpiry(time.Duration(req.Timeout) * time.Second)
+	} else {
+		conn.addExpiry(p.defaultIdleTimeout)
+	}
+
+	response := map[string]interface{}{
+		"success":    true,
+		"message":    "Connection ensured",
+		"reconnected": reconnected,
+		"connected":  conn.isConnectedToServer(),
+	}
+	sendJSONResponse(w, http.StatusOK, response)
+}
+
+func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is accepted")
+		return
+	}
+
+	var req APIRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		sendErrorResponse(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	p.connMutex.Lock()
+	conn, ok := p.connections[req.ConnectionID]
+	p.connMutex.Unlock()
+
+	if !ok {
+		sendErrorResponse(w, http.StatusNotFound, "Connection not found")
 		return
 	}
 
 	log.Printf("API: Sending message to client %s", req.ConnectionID)
 	if err := conn.writeToClient(conn.clientConn, conn.clientConn.RemoteAddr().String(), []byte(req.Data), p); err != nil {
-		http.Error(w, "Failed to send message to client", http.StatusInternalServerError)
+		sendErrorResponse(w, http.StatusInternalServerError, "Failed to send message to client")
 		return
 	}
 	p.logMessage("API-SERVER", conn.clientConn.RemoteAddr().String(), conn.clientPort, []byte(req.Data))
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Message sent to client"))
+	
+	response := map[string]interface{}{
+		"success": true,
+		"message": "Message sent to client",
+	}
+	sendJSONResponse(w, http.StatusOK, response)
 }
 
 func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Only POST method is accepted", http.StatusMethodNotAllowed)
+		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is accepted")
 		return
 	}
 
 	var req APIRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
@@ -523,7 +599,7 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 	p.connMutex.Unlock()
 
 	if !ok {
-		http.Error(w, "Connection not found", http.StatusNotFound)
+		sendErrorResponse(w, http.StatusNotFound, "Connection not found")
 		return
 	}
 
@@ -531,7 +607,7 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 	if !conn.isConnectedToServer() {
 		log.Printf("API: Server disconnected, attempting to reconnect for %s", req.ConnectionID)
 		if !conn.connectToServer() {
-			http.Error(w, "Failed to reconnect to server", http.StatusInternalServerError)
+			sendErrorResponse(w, http.StatusInternalServerError, "Failed to reconnect to server")
 			return
 		}
 	}
@@ -539,12 +615,16 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
 	if _, err := conn.serverConn.Write(ensureNewline([]byte(req.Data))); err != nil {
-		http.Error(w, "Failed to send message to server", http.StatusInternalServerError)
+		sendErrorResponse(w, http.StatusInternalServerError, "Failed to send message to server")
 		return
 	}
 	p.logMessage("API-CLIENT", conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Message sent to server"))
+	
+	response := map[string]interface{}{
+		"success": true,
+		"message": "Message sent to server",
+	}
+	sendJSONResponse(w, http.StatusOK, response)
 }
 
 func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.Request) {
@@ -578,7 +658,7 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 	p.connMutex.Unlock()
 
 	if !exists {
-		http.Error(w, "Connection not found", http.StatusNotFound)
+		sendErrorResponse(w, http.StatusNotFound, "Connection not found")
 		return
 	}
 
@@ -600,7 +680,7 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 	conn.mutex.Unlock()
 
 	if err != nil {
-		http.Error(w, "Failed to send message to server", http.StatusInternalServerError)
+		sendErrorResponse(w, http.StatusInternalServerError, "Failed to send message to server")
 		return
 	}
 
@@ -611,6 +691,7 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 	case <-collector.Ch:
 		// All expected responses received or single response if ExpectedCount was 0
 		response := map[string]interface{}{
+			"success":       true,
 			"correlationId": correlationID,
 			"responses":     collector.Responses,
 			"complete":      collector.Complete,
@@ -618,12 +699,12 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 			"expectedCount": req.ExpectedCount,
 			"timeout":       false,
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		sendJSONResponse(w, http.StatusOK, response)
 
 	case <-time.After(timeout):
 		// Return whatever we have so far
 		response := map[string]interface{}{
+			"success":       true,
 			"correlationId": correlationID,
 			"responses":     collector.Responses,
 			"complete":      false,
@@ -631,7 +712,6 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 			"expectedCount": req.ExpectedCount,
 			"timeout":       true,
 		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		sendJSONResponse(w, http.StatusOK, response)
 	}
 }

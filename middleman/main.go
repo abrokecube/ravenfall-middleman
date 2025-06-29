@@ -16,6 +16,7 @@ func main() {
 
 	// Set up the API endpoints
 	http.HandleFunc("/api/reconnect", proxy.handleReconnect)
+	http.HandleFunc("/api/ensure-connected", proxy.handleEnsureConnected)
 	http.HandleFunc("/api/send-to-client", proxy.handleSendToClient)
 	http.HandleFunc("/api/send-to-server", proxy.handleSendToServer)
 	http.HandleFunc("/api/send-and-wait-response", proxy.handleSendAndWaitResponse)

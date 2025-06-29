@@ -88,6 +88,25 @@ async def send_to_server(connection_id: str, message: str) -> Dict:
     return response
 
 
+async def ensure_connected(connection_id: str, timeout: int = 0) -> Dict:
+    """
+    Ensure the connection to the server is active.
+    
+    Args:
+        connection_id: The connection ID to check/ensure
+        timeout: Optional timeout in seconds for the connection (0 for default)
+        
+    Returns:
+        Dict containing the result of the operation
+    """
+    data = {
+        "connectionId": connection_id,
+        "timeout": timeout
+    }
+    response, status = await call_middleman_api('/api/ensure-connected', 'POST', data)
+    return response
+
+
 async def send_and_wait_response(connection_id: str, message: str, correlation_id: str = "", timeout: int = 30) -> Dict:
     """
     Send a message to the server and wait for a response with the given correlation ID.
