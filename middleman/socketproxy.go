@@ -63,7 +63,7 @@ func (p *SocketProxy) logMessage(source, clientAddr string, clientPort int, data
 	// We need to find the connection to get the server port
 	p.connMutex.Lock()
 	defer p.connMutex.Unlock()
-	
+
 	// Try to find a matching connection to get the server port
 	serverPort := 0 // Default to 0 if we can't find the connection
 	for _, conn := range p.connections {
@@ -72,7 +72,7 @@ func (p *SocketProxy) logMessage(source, clientAddr string, clientPort int, data
 			break
 		}
 	}
-	
+
 	p.broadcastMessageToClients(source, clientAddr, clientPort, serverPort, data)
 
 	if !p.enableMessageLogging {
@@ -487,7 +487,7 @@ func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	} else {
 		conn.addExpiry(p.defaultIdleTimeout)
 	}
-	
+
 	response := map[string]interface{}{
 		"success": true,
 		"message": "Reconnected successfully",
@@ -499,8 +499,8 @@ func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 type ConnectionStatus struct {
 	ClientConnected bool   `json:"clientConnected"`
 	ServerConnected bool   `json:"serverConnected"`
-	TimeUntilClose int64  `json:"timeUntilClose"` // in seconds
-	ConnectionID   string `json:"connectionId"`
+	TimeUntilClose  int64  `json:"timeUntilClose"` // in seconds
+	ConnectionID    string `json:"connectionId"`
 }
 
 // handleConnectionStatus returns the status of a connection
@@ -545,8 +545,8 @@ func (p *SocketProxy) handleConnectionStatus(w http.ResponseWriter, r *http.Requ
 	}
 
 	sendJSONResponse(w, http.StatusOK, map[string]interface{}{
-		"success":  true,
-		"status":   status,
+		"success": true,
+		"status":  status,
 	})
 }
 
@@ -593,10 +593,10 @@ func (p *SocketProxy) handleEnsureConnected(w http.ResponseWriter, r *http.Reque
 	}
 
 	response := map[string]interface{}{
-		"success":    true,
-		"message":    "Connection ensured",
+		"success":     true,
+		"message":     "Connection ensured",
 		"reconnected": reconnected,
-		"connected":  conn.isConnectedToServer(),
+		"connected":   conn.isConnectedToServer(),
 	}
 	sendJSONResponse(w, http.StatusOK, response)
 }
@@ -628,7 +628,7 @@ func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p.logMessage("API-SERVER", conn.clientConn.RemoteAddr().String(), conn.clientPort, []byte(req.Data))
-	
+
 	response := map[string]interface{}{
 		"success": true,
 		"message": "Message sent to client",
@@ -673,7 +673,7 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p.logMessage("API-CLIENT", conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
-	
+
 	response := map[string]interface{}{
 		"success": true,
 		"message": "Message sent to server",
@@ -694,7 +694,7 @@ func (p *SocketProxy) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 	sendJSONResponse(w, http.StatusOK, map[string]interface{}{
 		"success": true,
-		"config":    configCopy,
+		"config":  configCopy,
 	})
 }
 
