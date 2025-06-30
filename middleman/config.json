@@ -1,5 +1,6 @@
 {
     "enableMessageLogging": true,
+    "disableTimeout": false,
     "defaultTimeoutSeconds": 15,
     "noIdentifierTimeoutSeconds": 5,
     "apiPort": 8080,

@@ -10,6 +10,7 @@ import (
 // Config holds the full configuration from the JSON file.
 type Config struct {
 	EnableMessageLogging       bool           `json:"enableMessageLogging"`
+	DisableTimeout             bool           `json:"disableTimeout"`
 	DefaultTimeoutSeconds      int            `json:"defaultTimeoutSeconds"`
 	NoIdentifierTimeoutSeconds int            `json:"noIdentifierTimeoutSeconds"`
 	IdentifierTimeouts         map[string]int `json:"identifier_timeouts"`

@@ -25,7 +25,7 @@ type SocketProxy struct {
 	noIdentifierTimeout  time.Duration
 	identifierTimeouts   map[string]time.Duration
 	enableMessageLogging bool
-	processorCfg         MessageProcessorConfig
+	config               *Config // Reference to the main config
 	responseChannels     map[string]*ResponseCollector
 	responseMutex        sync.Mutex
 	usedCorrelationIDs   map[string]usedCorrelationID
@@ -124,7 +124,7 @@ func NewSocketProxy(config *Config) *SocketProxy {
 		noIdentifierTimeout:  noIdentifierTimeout,
 		identifierTimeouts:   identifierTimeouts,
 		enableMessageLogging: config.EnableMessageLogging,
-		processorCfg:         config.MessageProcessor,
+		config:               config,
 		responseChannels:     make(map[string]*ResponseCollector),
 		usedCorrelationIDs:   make(map[string]usedCorrelationID),
 	}
@@ -197,8 +197,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		clientConn:   clientConn,
 		clientPort:   clientPort,
 		serverConfig: serverConfig,
-		expiries:     []time.Time{},
-		processorCfg: p.processorCfg,
+		config:       p.config,
 		wsMutex:      sync.Mutex{},
 		mutex:        sync.Mutex{},
 	}
@@ -273,7 +272,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		}
 
 		processedData := buf[:n]
-		if proxyConn.processorCfg.Enabled {
+		if proxyConn.config != nil && proxyConn.config.MessageProcessor.Enabled {
 			// log.Printf("DEBUG: Sending to processor: %s", string(processedData))
 			processedResponse, blocked, err := proxyConn.forwardToProcessor(processedData, "client")
 			if err != nil {
@@ -496,6 +495,61 @@ func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	sendJSONResponse(w, http.StatusOK, response)
 }
 
+// ConnectionStatus represents the status of a connection
+type ConnectionStatus struct {
+	ClientConnected bool   `json:"clientConnected"`
+	ServerConnected bool   `json:"serverConnected"`
+	TimeUntilClose int64  `json:"timeUntilClose"` // in seconds
+	ConnectionID   string `json:"connectionId"`
+}
+
+// handleConnectionStatus returns the status of a connection
+func (p *SocketProxy) handleConnectionStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only GET method is accepted")
+		return
+	}
+
+	connectionID := r.URL.Query().Get("connectionId")
+	if connectionID == "" {
+		sendErrorResponse(w, http.StatusBadRequest, "connectionId parameter is required")
+		return
+	}
+
+	p.connMutex.Lock()
+	conn, ok := p.connections[connectionID]
+	p.connMutex.Unlock()
+
+	if !ok {
+		sendErrorResponse(w, http.StatusNotFound, "Connection not found")
+		return
+	}
+
+	status := ConnectionStatus{
+		ClientConnected: true, // If we have the connection, client is connected
+		ServerConnected: conn.isConnectedToServer(),
+		ConnectionID:    connectionID,
+	}
+
+	// Calculate time until connection expires
+	expiresAt := conn.GetExpiresAt()
+	if !expiresAt.IsZero() {
+		timeRemaining := time.Until(expiresAt).Seconds()
+		if timeRemaining > 0 {
+			status.TimeUntilClose = int64(timeRemaining)
+		} else {
+			status.TimeUntilClose = 0
+		}
+	} else {
+		status.TimeUntilClose = -1 // No expiration set
+	}
+
+	sendJSONResponse(w, http.StatusOK, map[string]interface{}{
+		"success":  true,
+		"status":   status,
+	})
+}
+
 // handleEnsureConnected ensures the connection to the server is active.
 // If the connection is not active, it will attempt to reconnect.
 // If the connection is already active, it will remain connected.
@@ -625,6 +679,23 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 		"message": "Message sent to server",
 	}
 	sendJSONResponse(w, http.StatusOK, response)
+}
+
+func (p *SocketProxy) handleGetConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only GET method is allowed")
+		return
+	}
+
+	// Create a safe copy of the config to return
+	configCopy := *p.config
+	// Don't expose sensitive information if any
+	// For example: configCopy.SomeSensitiveField = ""
+
+	sendJSONResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"config":    configCopy,
+	})
 }
 
 func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.Request) {

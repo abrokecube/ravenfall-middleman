@@ -24,11 +24,11 @@ type ProxyConnection struct {
 	serverConn     net.Conn
 	mutex          sync.Mutex
 	cancelForward  context.CancelFunc
-	expiries       []time.Time
+	expiresAt      time.Time // When the connection will expire (zero time means no expiration)
 	wsConn         *websocket.Conn
 	wsMutex        sync.Mutex
 	wsWriteMutex   sync.Mutex // Protects writes to the WebSocket connection
-	processorCfg   MessageProcessorConfig
+	config         *Config    // Reference to the main configuration
 	wsResponseChan chan []byte
 	wsErrorChan    chan error
 	wsReaderCancel context.CancelFunc
@@ -150,12 +150,27 @@ func (pc *ProxyConnection) isConnectedToServer() bool {
 	return pc.serverConn != nil
 }
 
-// addExpiry adds a new expiry timer to the connection.
+// addExpiry updates the connection's expiration time if the new duration is longer than the current one.
 func (pc *ProxyConnection) addExpiry(duration time.Duration) {
+	if duration <= 0 {
+		return
+	}
+	
+	expiryTime := time.Now().Add(duration)
 	pc.mutex.Lock()
 	defer pc.mutex.Unlock()
-	expiry := time.Now().Add(duration)
-	pc.expiries = append(pc.expiries, expiry)
+	
+	// Only update if the new expiry is in the future and later than the current expiry
+	if expiryTime.After(time.Now()) && (pc.expiresAt.IsZero() || expiryTime.After(pc.expiresAt)) {
+		pc.expiresAt = expiryTime
+	}
+}
+
+// GetExpiresAt returns the time when this connection will expire
+func (pc *ProxyConnection) GetExpiresAt() time.Time {
+	pc.mutex.Lock()
+	defer pc.mutex.Unlock()
+	return pc.expiresAt
 }
 
 // writeToClient writes data to the client connection with error handling and logging
@@ -229,7 +244,7 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []b
 	}
 
 	// If message processor is enabled, forward through it
-	if pc.processorCfg.Enabled {
+	if pc.config != nil && pc.config.MessageProcessor.Enabled {
 		processed, blocked, err := pc.forwardToProcessor(message, "server")
 		if err != nil {
 			log.Printf("Error processing message: %v, falling back to direct forwarding", err)
@@ -334,19 +349,18 @@ func (pc *ProxyConnection) shouldDisconnect() bool {
 	pc.mutex.Lock()
 	defer pc.mutex.Unlock()
 
-	now := time.Now()
-	var remainingExpiries []time.Time
-	hasActiveTimer := false
-
-	for _, expiry := range pc.expiries {
-		if expiry.After(now) {
-			hasActiveTimer = true
-			remainingExpiries = append(remainingExpiries, expiry)
-		}
+	// If timeouts are disabled in the config, never disconnect due to timeout
+	if pc.config != nil && pc.config.DisableTimeout {
+		return false
 	}
 
-	pc.expiries = remainingExpiries
-	return !hasActiveTimer
+	// If expiresAt is zero, there's no expiration set
+	if pc.expiresAt.IsZero() {
+		return false
+	}
+
+	// Check if the expiration time has passed
+	return time.Now().After(pc.expiresAt)
 }
 
 // forwardToProcessor sends a message to the external processor and returns the response.
@@ -394,7 +408,11 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 				log.Printf("DEBUG: Creating new WebSocket connection to processor")
 				dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
 				var dialErr error
-				conn, _, dialErr = dialer.Dial(pc.processorCfg.URL, nil)
+				if pc.config == nil || pc.config.MessageProcessor.URL == "" {
+					setupErr = fmt.Errorf("no processor URL configured")
+					return
+				}
+				conn, _, dialErr = dialer.Dial(pc.config.MessageProcessor.URL, nil)
 				if dialErr != nil {
 					log.Printf("ERROR: Failed to connect to processor (attempt %d/%d): %v", i+1, maxRetries+1, dialErr)
 					setupErr = dialErr // Propagate error
