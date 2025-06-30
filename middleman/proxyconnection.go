@@ -19,6 +19,7 @@ import (
 type ProxyConnection struct {
 	connectionID   string
 	clientConn     net.Conn
+	clientAddr     net.Addr
 	clientPort     int
 	serverConfig   ServerConfig
 	serverConn     net.Conn
@@ -34,7 +35,7 @@ type ProxyConnection struct {
 	wsReaderCancel context.CancelFunc
 }
 
-func (pc *ProxyConnection) connectToServer() bool {
+func (pc *ProxyConnection) connectToServer(p *SocketProxy) bool {
 	pc.mutex.Lock()
 	defer pc.mutex.Unlock()
 
@@ -47,6 +48,11 @@ func (pc *ProxyConnection) connectToServer() bool {
 	}
 	pc.serverConn = conn
 	log.Printf("Connected to server %s", serverAddr)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pc.cancelForward = cancel
+	go pc.forwardServerToClient(pc.clientConn, pc.clientAddr.String(), ctx, p)
+
 	return true
 }
 

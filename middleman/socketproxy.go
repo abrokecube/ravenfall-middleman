@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,7 +31,6 @@ type SocketProxy struct {
 	usedIDsMutex         sync.RWMutex
 }
 
-// NewSocketProxy creates a new SocketProxy.
 // broadcastMessageToClients sends the message to all connected WebSocket clients
 func (p *SocketProxy) broadcastMessageToClients(source, clientAddr string, clientPort, serverPort int, data []byte) {
 	// Extract just the IP address from the client address
@@ -93,6 +91,7 @@ func (p *SocketProxy) logMessage(source, clientAddr string, clientPort int, data
 	log.Printf("[from %s] %s:%d\n%s\n", source, clientAddr, clientPort, message)
 }
 
+// NewSocketProxy creates a new SocketProxy.
 func NewSocketProxy(config *Config) *SocketProxy {
 	// Set default API port if not specified
 	if config.APIPort == 0 {
@@ -193,13 +192,14 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 	connectionID := fmt.Sprintf("%s_%d_%d", serverConfig.Host, clientPort, serverConfig.Port)
 
 	proxyConn := &ProxyConnection{
-		connectionID: connectionID,
-		clientConn:   clientConn,
-		clientPort:   clientPort,
-		serverConfig: serverConfig,
-		config:       p.config,
-		wsMutex:      sync.Mutex{},
-		mutex:        sync.Mutex{},
+		connectionID:   connectionID,
+		clientConn:     clientConn,
+		clientAddr:     clientConn.RemoteAddr(),
+		clientPort:     clientConn.LocalAddr().(*net.TCPAddr).Port,
+		serverConfig:   serverConfig,
+		config:         p.config,
+		wsMutex:        sync.Mutex{},
+		mutex:          sync.Mutex{},
 	}
 
 	// Store the connection in the proxy's connection map
@@ -262,13 +262,10 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		}
 
 		if !proxyConn.isConnectedToServer() {
-			if !proxyConn.connectToServer() {
+			if !proxyConn.connectToServer(p) {
 				log.Printf("Failed to connect to server for client %s", clientAddr)
 				break
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			proxyConn.cancelForward = cancel
-			go proxyConn.forwardServerToClient(clientConn, clientAddr, ctx, p)
 		}
 
 		processedData := buf[:n]
@@ -478,7 +475,7 @@ func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("API: Forcing reconnect for %s", req.ConnectionID)
 	conn.disconnectFromServer()
-	if !conn.connectToServer() {
+	if !conn.connectToServer(p) {
 		sendErrorResponse(w, http.StatusInternalServerError, "Failed to reconnect to server")
 		return
 	}
@@ -577,8 +574,8 @@ func (p *SocketProxy) handleEnsureConnected(w http.ResponseWriter, r *http.Reque
 	// Check if we need to reconnect
 	reconnected := false
 	if !conn.isConnectedToServer() {
-		log.Printf("API: Server disconnected, attempting to reconnect for %s", req.ConnectionID)
-		if !conn.connectToServer() {
+		log.Printf("API: Connection %s is not connected, attempting to reconnect.", req.ConnectionID)
+		if !conn.connectToServer(p) {
 			sendErrorResponse(w, http.StatusInternalServerError, "Failed to reconnect to server")
 			return
 		}
@@ -594,7 +591,7 @@ func (p *SocketProxy) handleEnsureConnected(w http.ResponseWriter, r *http.Reque
 
 	response := map[string]interface{}{
 		"success":     true,
-		"message":     "Connection ensured",
+		"message":     "Connection is active",
 		"reconnected": reconnected,
 		"connected":   conn.isConnectedToServer(),
 	}
@@ -659,8 +656,8 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 
 	log.Printf("API: Sending message to server for %s", req.ConnectionID)
 	if !conn.isConnectedToServer() {
-		log.Printf("API: Server disconnected, attempting to reconnect for %s", req.ConnectionID)
-		if !conn.connectToServer() {
+		log.Printf("API: Connection %s is not connected, attempting to reconnect.", req.ConnectionID)
+		if !conn.connectToServer(p) {
 			sendErrorResponse(w, http.StatusInternalServerError, "Failed to reconnect to server")
 			return
 		}
@@ -740,7 +737,7 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 	// Send the message to the server
 	if !conn.isConnectedToServer() {
 		log.Printf("API: Server disconnected, attempting to reconnect for %s", req.ConnectionID)
-		if !conn.connectToServer() {
+		if !conn.connectToServer(p) {
 			http.Error(w, "Failed to reconnect to server", http.StatusInternalServerError)
 			return
 		}
