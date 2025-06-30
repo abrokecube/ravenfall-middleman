@@ -161,11 +161,11 @@ func (pc *ProxyConnection) addExpiry(duration time.Duration) {
 	if duration <= 0 {
 		return
 	}
-	
+
 	expiryTime := time.Now().Add(duration)
 	pc.mutex.Lock()
 	defer pc.mutex.Unlock()
-	
+
 	// Only update if the new expiry is in the future and later than the current expiry
 	if expiryTime.After(time.Now()) && (pc.expiresAt.IsZero() || expiryTime.After(pc.expiresAt)) {
 		pc.expiresAt = expiryTime
@@ -395,7 +395,7 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 	}
 
 	var err error
-	maxRetries := 0
+	maxRetries := 1
 	var response []byte
 	var messageData []byte
 
