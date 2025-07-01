@@ -251,7 +251,7 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []b
 
 	// If message processor is enabled, forward through it
 	if pc.config != nil && pc.config.MessageProcessor.Enabled {
-		processed, blocked, err := pc.forwardToProcessor(message, "server")
+		processed, blocked, err := pc.forwardToProcessor(message, "server", false)
 		if err != nil {
 			log.Printf("Error processing message: %v, falling back to direct forwarding", err)
 			// Fall back to direct forwarding on error
@@ -376,7 +376,7 @@ func (pc *ProxyConnection) shouldDisconnect() bool {
 // Returns:
 //   - error if processing failed
 //   - bool indicating if the message should be blocked
-func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]byte, bool, error) {
+func (pc *ProxyConnection) forwardToProcessor(message []byte, source string, isAPI bool) ([]byte, bool, error) {
 	timestamp := time.Now().Format(time.RFC3339)
 	// Generate a unique correlation ID for this message
 	correlationID := fmt.Sprintf("%s_%d", pc.connectionID, time.Now().UnixNano())
@@ -475,15 +475,18 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 
 		// --- Unlocked section for I/O ---
 
+		// Create a message wrapper with correlation ID
 		msgWrapper := MessageWrapper{
 			Source:        source,
 			ClientAddr:    clientAddr,
 			ServerAddr:    serverAddr,
 			ConnectionID:  pc.connectionID,
 			CorrelationID: correlationID,
+			IsAPI:         isAPI,
 			Timestamp:     timestamp,
 			Message:       json.RawMessage(message),
 		}
+
 		messageData, err = json.Marshal(msgWrapper)
 		if err != nil {
 			log.Printf("ERROR: Failed to marshal message wrapper: %v", err)

@@ -192,14 +192,14 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 	connectionID := fmt.Sprintf("%s_%d_%d", serverConfig.Host, clientPort, serverConfig.Port)
 
 	proxyConn := &ProxyConnection{
-		connectionID:   connectionID,
-		clientConn:     clientConn,
-		clientAddr:     clientConn.RemoteAddr(),
-		clientPort:     clientConn.LocalAddr().(*net.TCPAddr).Port,
-		serverConfig:   serverConfig,
-		config:         p.config,
-		wsMutex:        sync.Mutex{},
-		mutex:          sync.Mutex{},
+		connectionID: connectionID,
+		clientConn:   clientConn,
+		clientAddr:   clientConn.RemoteAddr(),
+		clientPort:   clientConn.LocalAddr().(*net.TCPAddr).Port,
+		serverConfig: serverConfig,
+		config:       p.config,
+		wsMutex:      sync.Mutex{},
+		mutex:        sync.Mutex{},
 	}
 
 	// Store the connection in the proxy's connection map
@@ -271,7 +271,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		processedData := buf[:n]
 		if proxyConn.config != nil && proxyConn.config.MessageProcessor.Enabled {
 			// log.Printf("DEBUG: Sending to processor: %s", string(processedData))
-			processedResponse, blocked, err := proxyConn.forwardToProcessor(processedData, "client")
+			processedResponse, blocked, err := proxyConn.forwardToProcessor(processedData, "client", false)
 			if err != nil {
 				log.Printf("Error processing message: %v. Forwarding original message.", err)
 				// Keep the original message if there was an error
@@ -619,12 +619,28 @@ func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	message := ensureNewline([]byte(req.Data))
+
 	log.Printf("API: Sending message to client %s", req.ConnectionID)
-	if err := conn.writeToClient(conn.clientConn, conn.clientConn.RemoteAddr().String(), []byte(req.Data), p); err != nil {
+	// If message processor is enabled, forward through it
+	if conn.config != nil && conn.config.MessageProcessor.Enabled {
+		processed, blocked, err := conn.forwardToProcessor(message, "API-server", true)
+		if err != nil {
+			log.Printf("Error processing API message: %v, forwarding original message", err)
+		} else if blocked {
+			sendErrorResponse(w, http.StatusForbidden, "Message blocked by processor")
+			return
+		} else if len(processed) > 0 {
+			// Use the processed message if we got one back
+			message = processed
+		}
+	}
+
+	if err := conn.writeToClient(conn.clientConn, conn.clientConn.RemoteAddr().String(), message, p); err != nil {
 		sendErrorResponse(w, http.StatusInternalServerError, "Failed to send message to client")
 		return
 	}
-	p.logMessage("API-SERVER", conn.clientConn.RemoteAddr().String(), conn.clientPort, []byte(req.Data))
+	p.logMessage("API-SERVER", conn.clientConn.RemoteAddr().String(), conn.clientPort, message)
 
 	response := map[string]interface{}{
 		"success": true,
@@ -663,9 +679,25 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	message := ensureNewline([]byte(req.Data))
+
+	// If message processor is enabled, forward through it
+	if conn.config != nil && conn.config.MessageProcessor.Enabled {
+		processed, blocked, err := conn.forwardToProcessor(message, "API-client", true)
+		if err != nil {
+			log.Printf("Error processing API message: %v, forwarding original message", err)
+		} else if blocked {
+			sendErrorResponse(w, http.StatusForbidden, "Message blocked by processor")
+			return
+		} else if len(processed) > 0 {
+			// Use the processed message if we got one back
+			message = processed
+		}
+	}
+
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
-	if _, err := conn.serverConn.Write(ensureNewline([]byte(req.Data))); err != nil {
+	if _, err := conn.serverConn.Write(message); err != nil {
 		sendErrorResponse(w, http.StatusInternalServerError, "Failed to send message to server")
 		return
 	}

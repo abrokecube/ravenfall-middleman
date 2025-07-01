@@ -221,7 +221,12 @@ async def process_message(message: str) -> str:
         source = data.get('source', 'UNKNOWN')
         connection_id = data.get('connection_id', 'unknown')
         correlation_id = data.get('correlation_id', '')
+        is_api = data.get('is_api', False)
         message_content = data.get('message', '')
+        
+        # Log if this is an API-originated message
+        if is_api:
+            logger.info(f"Processing API-originated message (Correlation ID: {correlation_id})")
         
         logger.debug(f"Processing message from {source} (connection: {connection_id}, correlation: {correlation_id})")
         

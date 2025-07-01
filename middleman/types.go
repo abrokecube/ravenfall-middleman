@@ -58,6 +58,7 @@ type MessageWrapper struct {
 	ServerAddr    string          `json:"server_addr"`    // Server's address (if connected)
 	ConnectionID  string          `json:"connection_id"`  // Unique ID for this connection
 	CorrelationID string          `json:"correlation_id"` // Unique ID to match requests and responses
+	IsAPI         bool            `json:"is_api"`         // True if the message originated from the API
 	Timestamp     string          `json:"timestamp"`      // When the message was sent
 	Message       json.RawMessage `json:"message"`        // The original message
 }
