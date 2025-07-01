@@ -68,3 +68,9 @@ type ProcessorResponse struct {
 	Block   bool            `json:"block"`   // If true, the message should be blocked
 	Message json.RawMessage `json:"message"` // The processed message (if not blocked)
 }
+
+// ResponseWrapper is the general wrapper for messages coming from the processor.
+// It is used to extract the correlation ID before full unmarshaling.
+type ResponseWrapper struct {
+	CorrelationID string `json:"correlation_id"`
+}

@@ -198,7 +198,6 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		clientPort:   clientConn.LocalAddr().(*net.TCPAddr).Port,
 		serverConfig: serverConfig,
 		config:       p.config,
-		wsMutex:      sync.Mutex{},
 		mutex:        sync.Mutex{},
 	}
 
@@ -212,7 +211,6 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 
 	defer func() {
 		proxyConn.disconnectFromServer()
-		proxyConn.disconnectFromMessageProcessor()
 		p.connMutex.Lock()
 		delete(p.connections, connectionID)
 		p.connMutex.Unlock()
@@ -292,9 +290,19 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		}
 
 		// log.Printf("DEBUG: Forwarding to server: %s", string(processedData))
-		if _, err := proxyConn.serverConn.Write(processedData); err != nil {
-			log.Printf("Error writing to server: %v", err)
-			proxyConn.disconnectFromServer()
+		proxyConn.mutex.Lock()
+		if proxyConn.serverConn != nil {
+			_, err := proxyConn.serverConn.Write(processedData)
+			proxyConn.mutex.Unlock() // Unlock right after using shared resource
+
+			if err != nil {
+				log.Printf("Error writing to server: %v", err)
+				proxyConn.disconnectFromServer()
+				break
+			}
+		} else {
+			proxyConn.mutex.Unlock() // Unlock if connection is already nil
+			log.Printf("Server connection for %s is closed, unable to forward message.", proxyConn.connectionID)
 			break
 		}
 	}

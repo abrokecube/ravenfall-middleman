@@ -12,6 +12,13 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
+	if config.MessageProcessor.URL != "" {
+		log.Printf("Initializing message processor connection to %s", config.MessageProcessor.URL)
+		processorConnector.Init(config.MessageProcessor.URL)
+	} else {
+		log.Println("WARN: Message processor URL not configured. Processor features will be disabled.")
+	}
+
 	proxy := NewSocketProxy(config)
 
 	// Set up the API endpoints

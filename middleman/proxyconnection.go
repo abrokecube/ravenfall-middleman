@@ -11,28 +11,20 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // ProxyConnection manages the connection between a client and a server.
 type ProxyConnection struct {
-	connectionID   string
-	clientConn     net.Conn
-	clientAddr     net.Addr
-	clientPort     int
-	serverConfig   ServerConfig
-	serverConn     net.Conn
-	mutex          sync.Mutex
-	cancelForward  context.CancelFunc
-	expiresAt      time.Time // When the connection will expire (zero time means no expiration)
-	wsConn         *websocket.Conn
-	wsMutex        sync.Mutex
-	wsWriteMutex   sync.Mutex // Protects writes to the WebSocket connection
-	config         *Config    // Reference to the main configuration
-	wsResponseChan chan []byte
-	wsErrorChan    chan error
-	wsReaderCancel context.CancelFunc
+	connectionID  string
+	clientConn    net.Conn
+	clientAddr    net.Addr
+	clientPort    int
+	serverConfig  ServerConfig
+	serverConn    net.Conn
+	mutex         sync.Mutex
+	cancelForward context.CancelFunc
+	expiresAt     time.Time // When the connection will expire (zero time means no expiration)
+	config        *Config   // Reference to the main configuration
 }
 
 func (pc *ProxyConnection) connectToServer(p *SocketProxy) bool {
@@ -68,86 +60,6 @@ func (pc *ProxyConnection) disconnectFromServer() {
 		pc.serverConn.Close()
 		pc.serverConn = nil
 	}
-}
-
-func (pc *ProxyConnection) disconnectFromMessageProcessor() {
-	pc.wsMutex.Lock()
-	defer pc.wsMutex.Unlock()
-
-	// Cancel the reader goroutine context
-	if pc.wsReaderCancel != nil {
-		pc.wsReaderCancel()
-		pc.wsReaderCancel = nil
-	}
-
-	// Close the websocket connection, which will unblock the reader
-	if pc.wsConn != nil {
-		log.Println("Disconnecting from message processor")
-		pc.wsConn.Close()
-		pc.wsConn = nil
-	}
-
-	// Close the response channel to unblock any waiting receivers
-	if pc.wsResponseChan != nil {
-		// This needs to be done carefully to avoid panics.
-		// In this design, the disconnect function owns the closing of the response channel.
-		close(pc.wsResponseChan)
-		pc.wsResponseChan = nil
-	}
-
-	// The reader goroutine is responsible for closing the error channel.
-	// We just nil it out here to prevent any lingering writes from a misbehaving goroutine.
-	if pc.wsErrorChan != nil {
-		pc.wsErrorChan = nil
-	}
-}
-
-// wsReader is a dedicated goroutine for reading messages from the WebSocket connection.
-// It handles control frames automatically and forwards data messages and errors
-// to the provided channels.
-func (pc *ProxyConnection) wsReader(ctx context.Context) {
-	// Goroutine will exit when the function returns.
-	// The caller is responsible for ensuring the connection is closed, which will
-	// cause ReadMessage to return an error, thus terminating the loop.
-	defer func() {
-		// Ensure error channel is closed on exit to signal completion/error.
-		if pc.wsErrorChan != nil {
-			close(pc.wsErrorChan)
-		}
-	}()
-
-	for {
-		// ReadMessage is a blocking call. It will also handle control frames
-		// (like pings) by invoking the handlers we've set up.
-		_, message, err := pc.wsConn.ReadMessage()
-		if err != nil {
-			// An error occurred. This could be a normal closure or an
-			// unexpected error. Send it to the error channel if the channel is not nil.
-			// We must check for ctx.Done to avoid blocking forever if the receiver has gone away.
-			select {
-			case pc.wsErrorChan <- err:
-			case <-ctx.Done():
-			}
-			return // Stop reading on any error.
-		}
-
-		// We received a data message. Send it to the response channel.
-		// We must check for ctx.Done to avoid blocking forever if the receiver has gone away.
-		select {
-		case pc.wsResponseChan <- message:
-			// Message sent successfully.
-		case <-ctx.Done():
-			// Context was canceled while trying to send.
-			return
-		}
-	}
-}
-
-// safeWriteMessage writes a message to the WebSocket connection in a thread-safe manner.
-func (pc *ProxyConnection) safeWriteMessage(messageType int, data []byte) error {
-	pc.wsWriteMutex.Lock()
-	defer pc.wsWriteMutex.Unlock()
-	return pc.wsConn.WriteMessage(messageType, data)
 }
 
 func (pc *ProxyConnection) isConnectedToServer() bool {
@@ -377,188 +289,78 @@ func (pc *ProxyConnection) shouldDisconnect() bool {
 //   - error if processing failed
 //   - bool indicating if the message should be blocked
 func (pc *ProxyConnection) forwardToProcessor(message []byte, source string, isAPI bool) ([]byte, bool, error) {
+	if pc.config == nil || !pc.config.MessageProcessor.Enabled {
+		return message, false, nil // Processor disabled, pass through
+	}
+
 	timestamp := time.Now().Format(time.RFC3339)
-	// Generate a unique correlation ID for this message
 	correlationID := fmt.Sprintf("%s_%d", pc.connectionID, time.Now().UnixNano())
 
 	var clientAddr, serverAddr string
 	if pc.clientConn != nil {
 		clientAddr = pc.clientConn.RemoteAddr().String()
+	} else if pc.clientPort > 0 {
+		clientAddr = fmt.Sprintf("unknown_client:%d", pc.clientPort)
 	} else {
-		if pc.clientPort > 0 {
-			clientAddr = fmt.Sprintf("unknown_client:%d", pc.clientPort)
-		} else {
-			clientAddr = "unknown_client"
-		}
+		clientAddr = "unknown_client"
 	}
+
 	if pc.serverConn != nil {
 		serverAddr = pc.serverConn.RemoteAddr().String()
 	} else {
 		serverAddr = fmt.Sprintf("%s:%d", pc.serverConfig.Host, pc.serverConfig.Port)
 	}
 
-	var err error
-	maxRetries := 1
-	var response []byte
-	var messageData []byte
-
-	for i := 0; i <= maxRetries; i++ {
-		var responseChan chan []byte
-		var errorChan chan error
-		var conn *websocket.Conn
-		var setupErr error
-
-		// Critical section to check/create connection under a lock
-		func() {
-			pc.wsMutex.Lock()
-			defer pc.wsMutex.Unlock()
-
-			if pc.wsConn == nil {
-				log.Printf("DEBUG: Creating new WebSocket connection to processor")
-				dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
-				var dialErr error
-				if pc.config == nil || pc.config.MessageProcessor.URL == "" {
-					setupErr = fmt.Errorf("no processor URL configured")
-					return
-				}
-				conn, _, dialErr = dialer.Dial(pc.config.MessageProcessor.URL, nil)
-				if dialErr != nil {
-					log.Printf("ERROR: Failed to connect to processor (attempt %d/%d): %v", i+1, maxRetries+1, dialErr)
-					setupErr = dialErr // Propagate error
-					return
-				}
-				pc.wsConn = conn
-
-				// Setup handlers
-				pc.wsConn.SetPingHandler(func(appData string) error {
-					pc.wsMutex.Lock()
-					defer pc.wsMutex.Unlock()
-					if pc.wsConn == nil {
-						return nil
-					}
-					// Use the safe write method for pong responses
-					return pc.safeWriteMessage(websocket.PongMessage, []byte(appData))
-				})
-				// pc.wsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
-				pc.wsConn.SetPongHandler(func(string) error {
-					pc.wsMutex.Lock()
-					defer pc.wsMutex.Unlock()
-					if pc.wsConn == nil {
-						return nil
-					}
-					pc.wsConn.SetReadDeadline(time.Now().Add(60 * time.Second))
-					return nil
-				})
-
-				// Create channels and start reader
-				pc.wsResponseChan = make(chan []byte)
-				pc.wsErrorChan = make(chan error, 1)
-				var readerCtx context.Context
-				readerCtx, pc.wsReaderCancel = context.WithCancel(context.Background())
-				go pc.wsReader(readerCtx)
-				log.Println("DEBUG: Successfully connected to processor and started reader goroutine")
-			}
-
-			// Get connection and channels to use outside the lock
-			conn = pc.wsConn
-			responseChan = pc.wsResponseChan
-			errorChan = pc.wsErrorChan
-		}()
-
-		if setupErr != nil {
-			if i == maxRetries {
-				return nil, true, fmt.Errorf("failed to connect to processor after %d attempts: %w", maxRetries+1, setupErr)
-			}
-			time.Sleep(time.Second * time.Duration(1))
-			continue
-		}
-
-		// --- Unlocked section for I/O ---
-
-		// Create a message wrapper with correlation ID
-		msgWrapper := MessageWrapper{
-			Source:        source,
-			ClientAddr:    clientAddr,
-			ServerAddr:    serverAddr,
-			ConnectionID:  pc.connectionID,
-			CorrelationID: correlationID,
-			IsAPI:         isAPI,
-			Timestamp:     timestamp,
-			Message:       json.RawMessage(message),
-		}
-
-		messageData, err = json.Marshal(msgWrapper)
-		if err != nil {
-			log.Printf("ERROR: Failed to marshal message wrapper: %v", err)
-			return nil, true, fmt.Errorf("failed to marshal message wrapper: %w", err)
-		}
-
-		if err = pc.safeWriteMessage(websocket.TextMessage, messageData); err != nil {
-			log.Printf("ERROR: Failed to send message (attempt %d/%d): %v", i+1, maxRetries+1, err)
-			pc.disconnectFromMessageProcessor()
-			if i == maxRetries {
-				return nil, true, fmt.Errorf("failed to send message after %d attempts: %w", maxRetries+1, err)
-			}
-			time.Sleep(time.Second * time.Duration(1))
-			continue
-		}
-
-		select {
-		case response = <-responseChan:
-			// Got a response, proceed
-		case err = <-errorChan:
-			log.Printf("ERROR: WebSocket read error (attempt %d/%d): %v", i+1, maxRetries+1, err)
-			pc.disconnectFromMessageProcessor()
-			if i == maxRetries {
-				return nil, true, fmt.Errorf("failed to read message after %d attempts: %w", maxRetries+1, err)
-			}
-			time.Sleep(time.Second * time.Duration(1))
-			continue
-		case <-time.After(10 * time.Second):
-			log.Printf("ERROR: Timeout waiting for response from processor (attempt %d/%d)", i+1, maxRetries+1)
-			pc.disconnectFromMessageProcessor()
-			if i == maxRetries {
-				return nil, true, fmt.Errorf("timed out waiting for response after %d attempts", maxRetries+1)
-			}
-			time.Sleep(time.Second * time.Duration(1))
-			continue
-		}
-
-		break // Success, exit retry loop
+	msgWrapper := MessageWrapper{
+		Source:        source,
+		ClientAddr:    clientAddr,
+		ServerAddr:    serverAddr,
+		ConnectionID:  pc.connectionID,
+		CorrelationID: correlationID,
+		IsAPI:         isAPI,
+		Timestamp:     timestamp,
+		Message:       json.RawMessage(message),
 	}
 
-	// Parse the response which now includes the correlation ID
+	messageData, err := json.Marshal(msgWrapper)
+	if err != nil {
+		log.Printf("ERROR: Failed to marshal message wrapper: %v", err)
+		return nil, true, fmt.Errorf("failed to marshal message wrapper: %w", err)
+	}
+
+	response, err := processorConnector.Send(messageData, correlationID)
+	if err != nil {
+		log.Printf("ERROR: Failed to send message to processor: %v", err)
+		return nil, true, fmt.Errorf("failed to communicate with processor: %w", err)
+	}
+
 	var procResp struct {
 		ProcessorResponse
-		CorrelationID string          `json:"correlation_id"`
-		Error         string          `json:"error,omitempty"`
-		Message       json.RawMessage `json:"message,omitempty"`
+		CorrelationID string `json:"correlation_id"`
+		Error         string `json:"error,omitempty"`
 	}
 
-	if err = json.Unmarshal(response, &procResp); err != nil {
+	if err := json.Unmarshal(response, &procResp); err != nil {
 		log.Printf("ERROR: Failed to parse processor response: %v", err)
-		return nil, false, fmt.Errorf("failed to parse processor response: %w", err)
+		return nil, true, fmt.Errorf("failed to parse processor response: %w", err)
 	}
 
-	// Verify the correlation ID matches
 	if procResp.CorrelationID != correlationID {
-		log.Printf("WARNING: Mismatched correlation ID in response. Expected: %s, Got: %s", correlationID, procResp.CorrelationID)
-		// Continue processing anyway since we have the message
+		log.Printf("WARN: Mismatched correlation ID. Expected %s, got %s", correlationID, procResp.CorrelationID)
+		return nil, true, fmt.Errorf("mismatched correlation ID")
 	}
 
-	// Check for processing errors
 	if procResp.Error != "" {
-		log.Printf("ERROR: Processor returned error: %s", procResp.Error)
-		return nil, false, fmt.Errorf("processor error: %s", procResp.Error)
+		log.Printf("ERROR: Processor returned an error: %s", procResp.Error)
+		return nil, true, fmt.Errorf("processor error: %s", procResp.Error)
 	}
 
 	if procResp.Block {
-		log.Printf("DEBUG: Message blocked by processor")
+		log.Printf("DEBUG: Message blocked by processor for connection %s", pc.connectionID)
 		return nil, true, nil
 	}
 
-	// If no message was returned, use the original message
-	if len(procResp.Message) == 0 {
+	if len(procResp.Message) == 0 || bytes.Equal(procResp.Message, []byte("null")) {
 		return message, false, nil
 	}
 
