@@ -378,6 +378,9 @@ func (pc *ProxyConnection) shouldDisconnect() bool {
 //   - bool indicating if the message should be blocked
 func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]byte, bool, error) {
 	timestamp := time.Now().Format(time.RFC3339)
+	// Generate a unique correlation ID for this message
+	correlationID := fmt.Sprintf("%s_%d", pc.connectionID, time.Now().UnixNano())
+
 	var clientAddr, serverAddr string
 	if pc.clientConn != nil {
 		clientAddr = pc.clientConn.RemoteAddr().String()
@@ -473,8 +476,13 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 		// --- Unlocked section for I/O ---
 
 		msgWrapper := MessageWrapper{
-			Source: source, ClientAddr: clientAddr, ServerAddr: serverAddr,
-			ConnectionID: pc.connectionID, Timestamp: timestamp, Message: json.RawMessage(message),
+			Source:        source,
+			ClientAddr:    clientAddr,
+			ServerAddr:    serverAddr,
+			ConnectionID:  pc.connectionID,
+			CorrelationID: correlationID,
+			Timestamp:     timestamp,
+			Message:       json.RawMessage(message),
 		}
 		messageData, err = json.Marshal(msgWrapper)
 		if err != nil {
@@ -516,17 +524,40 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source string) ([]
 		break // Success, exit retry loop
 	}
 
-	var procResp ProcessorResponse
+	// Parse the response which now includes the correlation ID
+	var procResp struct {
+		ProcessorResponse
+		CorrelationID string          `json:"correlation_id"`
+		Error         string          `json:"error,omitempty"`
+		Message       json.RawMessage `json:"message,omitempty"`
+	}
+
 	if err = json.Unmarshal(response, &procResp); err != nil {
 		log.Printf("ERROR: Failed to parse processor response: %v", err)
 		return nil, false, fmt.Errorf("failed to parse processor response: %w", err)
 	}
+
+	// Verify the correlation ID matches
+	if procResp.CorrelationID != correlationID {
+		log.Printf("WARNING: Mismatched correlation ID in response. Expected: %s, Got: %s", correlationID, procResp.CorrelationID)
+		// Continue processing anyway since we have the message
+	}
+
+	// Check for processing errors
+	if procResp.Error != "" {
+		log.Printf("ERROR: Processor returned error: %s", procResp.Error)
+		return nil, false, fmt.Errorf("processor error: %s", procResp.Error)
+	}
+
 	if procResp.Block {
 		log.Printf("DEBUG: Message blocked by processor")
 		return nil, true, nil
 	}
+
+	// If no message was returned, use the original message
 	if len(procResp.Message) == 0 {
 		return message, false, nil
 	}
+
 	return ensureNewline(procResp.Message), false, nil
 }

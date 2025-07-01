@@ -53,12 +53,13 @@ type usedCorrelationID struct {
 // MessageWrapper is used to wrap messages with metadata
 // when sending to the processor
 type MessageWrapper struct {
-	Source       string          `json:"source"`        // "CLIENT" "SERVER" "API-CLIENT" "API-SERVER"
-	ClientAddr   string          `json:"client_addr"`   // Client's remote address
-	ServerAddr   string          `json:"server_addr"`   // Server's address (if connected)
-	ConnectionID string          `json:"connection_id"` // Unique ID for this connection
-	Timestamp    string          `json:"timestamp"`     // When the message was sent
-	Message      json.RawMessage `json:"message"`       // The original message
+	Source        string          `json:"source"`         // "CLIENT" "SERVER" "API-CLIENT" "API-SERVER"
+	ClientAddr    string          `json:"client_addr"`    // Client's remote address
+	ServerAddr    string          `json:"server_addr"`    // Server's address (if connected)
+	ConnectionID  string          `json:"connection_id"`  // Unique ID for this connection
+	CorrelationID string          `json:"correlation_id"` // Unique ID to match requests and responses
+	Timestamp     string          `json:"timestamp"`      // When the message was sent
+	Message       json.RawMessage `json:"message"`        // The original message
 }
 
 // ProcessorResponse represents the response from the message processor

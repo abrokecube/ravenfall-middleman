@@ -217,32 +217,25 @@ async def process_message(message: str) -> str:
         # Parse the incoming message as JSON
         data = json.loads(message)
         
-        # Check if this is a wrapped message with source information
-        if isinstance(data, dict) and 'source' in data and 'message' in data:
-            source = data['source']  # 'client' or 'server'
-            message_content = data['message']
-            
-            # Log the message with all its metadata
-            logger.info(
-                f"Processing {source.upper()} message from {data.get('client_addr', 'unknown')} "
-                f"(conn: {data.get('connection_id', 'unknown')}) at {data.get('timestamp')}"
-            )
-            
-            # Here you can add source-specific processing if needed
-            if source == 'client':
-                # Process client message
-                processed_content = message_content
-                logger.debug(f"Client message content: {message_content}")
-            else:  # server
-                # Process server message
-                processed_content = message_content
-                logger.debug(f"Server message content: {message_content}")
-                
-            # Return the processed content (you might want to wrap it back with source info)
-            return json.dumps(processed_content) + '\n'
-            
-        # If it's not a wrapped message, process it as before
-        return json.dumps(data) + '\n'
+        # Extract the original message and metadata
+        source = data.get('source', 'UNKNOWN')
+        connection_id = data.get('connection_id', 'unknown')
+        correlation_id = data.get('correlation_id', '')
+        message_content = data.get('message', '')
+        
+        logger.debug(f"Processing message from {source} (connection: {connection_id}, correlation: {correlation_id})")
+        
+        # Here you would add your custom message processing logic
+        # For now, we'll just log and return the message as-is
+        logger.debug(f"Message content: {message_content}")
+        
+        # Create response with correlation ID
+        response = {
+            "message": message_content,
+            "correlation_id": correlation_id  # Echo back the correlation ID
+        }
+        
+        return json.dumps(response) + '\n'
         
     except json.JSONDecodeError as e:
         error_msg = f"Invalid JSON: {str(e)}"
