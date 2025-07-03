@@ -142,7 +142,7 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []b
 			// Check if there's a waiting collector for this correlation ID
 			if collector, exists := proxy.getExistingCollector(correlationID); exists && !collector.Complete {
 				// Add to responses
-				collector.Responses = append(collector.Responses, string(message))
+				collector.Responses = append(collector.Responses, message)
 				collector.Count++
 
 				// Check if we've received all expected responses

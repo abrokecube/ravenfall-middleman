@@ -31,7 +31,7 @@ type APIRequest struct {
 
 // ResponseCollector holds the collected responses
 type ResponseCollector struct {
-	Responses []string
+	Responses []json.RawMessage
 	Count     int
 	Expected  int
 	Complete  bool

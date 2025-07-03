@@ -359,7 +359,7 @@ func (p *SocketProxy) getResponseCollector(correlationID string, expectedCount i
 	collector := &ResponseCollector{
 		Expected:  expectedCount,
 		Ch:        make(chan struct{}),
-		Responses: []string{},
+		Responses: []json.RawMessage{},
 	}
 
 	p.responseChannels[correlationID] = collector
@@ -747,8 +747,21 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Generate a new correlation ID
-	correlationID := generateCorrelationID()
+	// Parse the request data to check for CorrelationId
+	var dataMap map[string]interface{}
+	var correlationID string
+	
+	if err := json.Unmarshal([]byte(req.Data), &dataMap); err == nil {
+		// If CorrelationId exists in the data and is a non-empty string, use it
+		if id, ok := dataMap["CorrelationId"].(string); ok && id != "" {
+			correlationID = id
+		} else {
+			correlationID = generateCorrelationID()
+		}
+	} else {
+		// If we can't parse the JSON, generate a new correlation ID
+		correlationID = generateCorrelationID()
+	}
 
 	// Set default values
 	if req.ExpectedCount < 0 {

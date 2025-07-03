@@ -98,6 +98,18 @@ class ServerConfig(TypedDict):
     messageProcessor: dict[str, Any]
 
 
+class SendAndWaitResult(TypedDict, total=False):
+    """Type definition for API responses from the middleman server."""
+    success: bool
+    correlationId: str
+    responses: list[Any]
+    complete: bool
+    count: int
+    expectedCount: int
+    timeout: bool
+    error: str  # Optional error message
+
+
 async def get_config() -> tuple[ServerConfig | None, str | None]:
     """
     Get the server configuration.
