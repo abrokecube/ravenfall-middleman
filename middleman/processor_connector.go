@@ -123,7 +123,7 @@ func (c *ProcessorConnector) Send(messageData []byte, correlationID string) ([]b
 	select {
 	case response := <-responseChan:
 		return response, nil
-	case <-time.After(10 * time.Second):
-		return nil, fmt.Errorf("timeout waiting for response from processor")
+	case <-time.After(5 * time.Second):
+		return nil, fmt.Errorf("timeout waiting for response from processor (correlation ID: %s)", correlationID)
 	}
 }
