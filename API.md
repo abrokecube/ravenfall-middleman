@@ -163,6 +163,120 @@ POST /api/send-and-wait-response
 - `expectedCount`: Number of responses that were expected
 - `timeout`: Present and true if the request timed out
 
+---
+
+### 5. Ensure Connection
+
+Ensures that a connection to the server is active. If the connection is not active, it attempts to reconnect.
+
+```http
+POST /api/ensure-connected
+```
+
+**Request Body:**
+
+```json
+{
+  "connectionId": "string",
+  "timeout": 0
+}
+```
+
+**Parameters:**
+- `connectionId` (string, required): The ID of the connection to check/reconnect
+- `timeout` (int, optional): Time in seconds to extend the connection expiry.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "message": "Connection is active",
+  "reconnected": false,
+  "connected": true
+}
+```
+
+---
+
+### 6. Get Connection Status
+
+Retrieve the status of a specific connection.
+
+```http
+GET /api/connection-status?connectionId=<connectionId>
+```
+
+**Parameters:**
+- `connectionId` (string, required): The ID of the connection to check
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "status": {
+    "clientConnected": true,
+    "serverConnected": true,
+    "timeUntilClose": 60,
+    "connectionId": "string"
+  }
+}
+```
+
+---
+
+### 7. Get Configuration
+
+Retrieve the current configuration of the middleman service.
+
+```http
+GET /api/config
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "config": {
+    ...
+  }
+}
+```
+
+---
+
+### 8. WebSocket Message Stream
+
+Real-time stream of all messages passing through the middleman.
+
+```
+ws://localhost:8080/ws
+```
+
+**Message Format:**
+
+Messages received on this WebSocket are JSON objects with the following structure:
+
+```json
+{
+  "source": "CLIENT",
+  "client_addr": "127.0.0.1:54321",
+  "server_addr": "localhost:4040",
+  "connection_id": "127.0.0.1_54321_4040",
+  "correlation_id": "",
+  "is_api": false,
+  "timestamp": "2023-10-27T10:00:00Z",
+  "message": { ... }
+}
+```
+
+- `source`: Origin of the message ("CLIENT", "SERVER", "API-CLIENT", "API-SERVER")
+- `message`: The actual message content (JSON)
+
+---
+
 ## Error Responses
 
 ### 400 Bad Request
@@ -219,4 +333,18 @@ curl -X POST http://localhost:8080/api/send-to-client \
 curl -X POST http://localhost:8080/api/send-and-wait-response \
   -H "Content-Type: application/json" \
   -d '{"connectionId": "abc123", "data": "PING", "timeout": 10}'
+```
+
+### Ensuring Connection
+
+```bash
+curl -X POST http://localhost:8080/api/ensure-connected \
+  -H "Content-Type: application/json" \
+  -d '{"connectionId": "abc123", "timeout": 300}'
+```
+
+### Checking Connection Status
+
+```bash
+curl http://localhost:8080/api/connection-status?connectionId=abc123
 ```
