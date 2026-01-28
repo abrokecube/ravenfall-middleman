@@ -1,338 +1,384 @@
 import asyncio
+import datetime
 import json
 import logging
 import os
 import signal
-import aiohttp
+import uuid
+from typing import Dict, Any, Optional, Tuple, Callable, Awaitable, List, Union, TypedDict, TypeVar, Generic, Type, Literal
+from uuid import UUID
+from dataclasses import dataclass, field
+from websockets import WebSocketServerProtocol as WebSocketServer
 import websockets
-from typing import Dict, Any, Optional, Tuple, TypedDict, Literal
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
+# Type variable for message content types
+T = TypeVar('T', bound=Dict[str, Any])
 
-# Configuration
-HOST = os.getenv('HOST', '127.0.0.1')
-PORT = int(os.getenv('PORT', '8000'))
-MIDDLEMAN_API_HOST = os.getenv('MIDDLEMAN_API_HOST', 'http://127.0.0.1:8080')
-LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
-MAX_MESSAGE_SIZE_MB = int(os.getenv('MAX_MESSAGE_SIZE_MB', '10'))  # 10MB default
-MAX_MESSAGE_SIZE = MAX_MESSAGE_SIZE_MB * 1024 * 1024  # Convert MB to bytes
-COMPRESSION_ENABLED = os.getenv('COMPRESSION_ENABLED', 'true').lower() == 'true'
-DEBUG = os.getenv('DEBUG', 'false').lower() == 'true'
+class Sender(TypedDict):
+    Id: UUID
+    CharacterId: UUID
+    Username: str
+    DisplayName: str
+    Color: str
+    Platform: str
+    PlatformId: str
+    IsBroadcaster: bool
+    IsModerator: bool
+    IsSubscriber: bool
+    IsVip: bool
+    IsGameAdministrator: bool
+    IsGameModerator: bool
+    SubTier: int
+    Identifier: str
+
+class RavenBotMessage(TypedDict):
+    """Represents a message from RavenBot with its metadata."""
+    Identifier: str
+    Sender: Sender
+    Content: str
+    CorrelationId: UUID
+
+class Recipient(TypedDict):
+    """Represents the recipient information in a Ravenfall message."""
+    UserId: UUID
+    CharacterId: UUID
+    Platform: str
+    PlatformId: str
+    PlatformUserName: str
+
+class RavenfallMessage(TypedDict):
+    """Represents a message received from Ravenfall."""
+    Identifier: str  # e.g., "message"
+    Recipient: Recipient
+    Format: str  # Format string for the message
+    Args: List[str]  # Arguments to be inserted into the format string
+    Tags: List[str]  # Any tags associated with the message
+    Category: str  # Message category (if any)
+    CorrelationId: UUID  # For tracking the message
+
+# Union type for all possible message types
+RavenMessage = Union[RavenBotMessage, RavenfallMessage, Dict[str, Any]]
 
 # Configure logging
-log_level = logging.DEBUG if DEBUG else getattr(logging, LOG_LEVEL.upper(), logging.INFO)
-logging.basicConfig(
-    level=log_level,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger('message_processor')
+logger = logging.getLogger('new_message_processor')
 
-# Global variable to control the server loop
-stop_event = asyncio.Event()
+@dataclass
+class ProcessorResponse(TypedDict, total=False):
+    """Response format for message processor callbacks."""
+    block: bool  # If True, the message will be blocked
+    message: Dict[str, Any]  # Modified message content (optional)
+    error: str  # Error message (optional)
 
-def handle_sigint():
-    """Handle Ctrl+C signal to gracefully shut down the server."""
-    logger.info("Shutting down server...")
-    stop_event.set()
+@dataclass
+class MessageMetadata:
+    """Metadata about a message being processed."""
+    source: str = "unknown"
+    connection_id: str = "unknown"
+    correlation_id: str = ""
+    is_api: bool = False
+    timestamp: str = field(default_factory=lambda: datetime.datetime.utcnow().isoformat())
+    custom_metadata: Dict[str, Any] = field(default_factory=dict)
+    client_addr: str = ""
+    server_addr: str = ""
 
-async def call_middleman_api(endpoint: str, method: str = 'GET', data: Optional[Dict] = None) -> Tuple[Dict, int]:
-    """Make an API call to the middleman server."""
-    url = f"{MIDDLEMAN_API_HOST.rstrip('/')}/{endpoint.lstrip('/')}"
-    headers = {'Content-Type': 'application/json'}
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            if method.upper() == 'GET':
-                async with session.get(url, headers=headers) as response:
-                    return await response.json(), response.status
-            else:
-                async with session.post(url, json=data, headers=headers) as response:
-                    return await response.json(), response.status
-    except Exception as e:
-        logger.error(f"Error calling middleman API: {str(e)}", exc_info=DEBUG)
-        return {"error": f"Failed to connect to middleman API: {str(e)}"}, 500
+# Define types for callbacks
+MessageCallback = Callable[
+    [RavenMessage, MessageMetadata, 'ClientInfo'],  # message_data, metadata, client_info
+    Awaitable[Optional[RavenMessage]]  # Return None to keep current message, or return new message data
+]
+ConnectionCallback = Callable[['ClientInfo'], Awaitable[None]]
 
-async def list_connections() -> Dict:
-    """List all active connections."""
-    response, status = await call_middleman_api('/api/connections')
-    return response
+@dataclass
+class ClientInfo:
+    """Information about a connected WebSocket client."""
+    websocket: WebSocketServer
+    client_id: str
+    remote_address: str
+    connection_time: float = field(default_factory=lambda: asyncio.get_event_loop().time())
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
-async def force_reconnect(connection_id: str, timeout: int = 0) -> Dict:
-    """Force a reconnection for the specified connection."""
-    data = {
-        "connectionId": connection_id,
-        "timeout": timeout
-    }
-    response, status = await call_middleman_api('/api/reconnect', 'POST', data)
-    return response
-
-async def send_to_client(connection_id: str, message: str) -> Dict:
-    """Send a message to a specific client."""
-    data = {
-        "connectionId": connection_id,
-        "data": message
-    }
-    response, status = await call_middleman_api('/api/send-to-client', 'POST', data)
-    return response
-
-class ConnectionStatus(TypedDict):
-    """Type definition for connection status response."""
-    connectionId: str
-    clientConnected: bool
-    serverConnected: bool
-    timeUntilClose: int  # seconds until disconnect, -1 if no timeout set
-
-
-class ServerConfig(TypedDict):
-    """Type definition for server configuration."""
-    enableMessageLogging: bool
-    disableTimeout: bool
-    defaultTimeoutSeconds: int
-    noIdentifierTimeoutSeconds: int
-    apiPort: int
-    identifier_timeouts: dict[str, int]
-    proxy_mappings: list[dict[str, Any]]
-    messageProcessor: dict[str, Any]
-
-
-class SendAndWaitResult(TypedDict, total=False):
-    """Type definition for API responses from the middleman server."""
-    success: bool
-    correlationId: str
-    responses: list[Any]
-    complete: bool
-    count: int
-    expectedCount: int
-    timeout: bool
-    error: str  # Optional error message
-
-
-async def get_config() -> tuple[ServerConfig | None, str | None]:
-    """
-    Get the server configuration.
-    
-    Returns:
-        Tuple of (ServerConfig, error_message). If successful, error_message is None.
-        On error, ServerConfig is None and error_message contains the error.
-    """
-    response, status = await call_middleman_api('/api/config', 'GET')
-    
-    if status != 200:
-        return None, response.get('error', 'Unknown error')
-    
-    if not response.get('success', False):
-        return None, response.get('error', 'Failed to get config')
-    
-    return response.get('config'), None
-
-
-async def get_connection_status(connection_id: str) -> tuple[ConnectionStatus | None, str | None]:
-    """
-    Get the status of a connection.
-    
-    Args:
-        connection_id: The ID of the connection to check
+class MessageProcessor:
+    def __init__(self, host: str = '0.0.0.0', port: int = 8000, max_message_size: int = 10 * 1024 * 1024):
+        """
+        Initializes the MessageProcessor with WebSocket server configuration.
         
-    Returns:
-        Tuple of (ConnectionStatus, error_message). If successful, error_message is None.
-        On error, ConnectionStatus is None and error_message contains the error.
-    """
-    response, status = await call_middleman_api(f'/api/connection-status?connectionId={connection_id}', 'GET')
-    
-    if status != 200:
-        return None, response.get('error', 'Unknown error')
-    
-    if not response.get('success', False):
-        return None, response.get('error', 'Failed to get connection status')
-    
-    status_data = response.get('status', {})
-    return {
-        'connectionId': status_data.get('connectionId', ''),
-        'clientConnected': status_data.get('clientConnected', False),
-        'serverConnected': status_data.get('serverConnected', False),
-        'timeUntilClose': status_data.get('timeUntilClose', -1)
-    }, None
+        Args:
+            host: Host to bind the WebSocket server to
+            port: Port to listen on
+            max_message_size: Maximum message size in bytes (default: 10MB)
+        """
+        self.host = host
+        self.port = port
+        self.max_message_size = max_message_size
+        self.server = None
+        self.clients: Dict[str, ClientInfo] = {}
+        self.running = False
+        
+        # Callback lists
+        self.message_callbacks: List[MessageCallback] = []
+        self.connection_callbacks: List[ConnectionCallback] = []
+        self.disconnection_callbacks: List[ConnectionCallback] = []
+        
+        logger.info(f"MessageProcessor initialized on {host}:{port}")
 
-
-async def send_to_server(connection_id: str, message: str) -> Dict:
-    """Send a message to the server through a specific connection."""
-    data = {
-        "connectionId": connection_id,
-        "data": message
-    }
-    response, status = await call_middleman_api('/api/send-to-server', 'POST', data)
-    return response
-
-
-async def ensure_connected(connection_id: str, timeout: int = 0) -> Dict:
-    """
-    Ensure the connection to the server is active.
+    # Callback registration methods
+    def add_message_callback(self, callback: MessageCallback) -> None:
+        """Register a callback to process incoming messages."""
+        self.message_callbacks.append(callback)
+        
+    def add_connection_callback(self, callback: ConnectionCallback) -> None:
+        """Register a callback for new client connections."""
+        self.connection_callbacks.append(callback)
+        
+    def add_disconnection_callback(self, callback: ConnectionCallback) -> None:
+        """Register a callback for client disconnections."""
+        self.disconnection_callbacks.append(callback)
     
-    Args:
-        connection_id: The connection ID to check/ensure
-        timeout: Optional timeout in seconds for the connection (0 for default)
-        
-    Returns:
-        Dict containing the result of the operation
-    """
-    data = {
-        "connectionId": connection_id,
-        "timeout": timeout
-    }
-    response, status = await call_middleman_api('/api/ensure-connected', 'POST', data)
-    return response
+    async def process_message(self, message: str, client_info: ClientInfo) -> str:
+        """
+        Processes an incoming message and returns a response.
 
-
-async def send_and_wait_response(connection_id: str, message: str, correlation_id: str = "", timeout: int = 30) -> Dict:
-    """
-    Send a message to the server and wait for a response with the given correlation ID.
-    
-    Args:
-        connection_id: The connection ID to send the message through
-        message: The message to send to the server
-        correlation_id: Optional correlation ID to match the response. If not provided, one will be generated.
-        timeout: Maximum time in seconds to wait for a response (default: 30)
+        This method can be overridden by subclasses or extended using callbacks.
         
-    Returns:
-        Dict containing the response data or error information
-    """
-    data = {
-        "connectionId": connection_id,
-        "data": message,
-        "timeout": timeout
-    }
-    
-    if correlation_id:
-        data["correlationId"] = correlation_id
-        
-    response, status = await call_middleman_api('/api/send-and-wait-response', 'POST', data)
-    return response
-
-async def process_message(message: str) -> str:
-    """
-    Process an incoming message and return a response.
-    
-    To block a message, return a dictionary with {"block": True}
-    To modify a message, return a dictionary with {"message": "modified message"}
-    To allow the message through unmodified, return an empty dictionary or None
-    
-    Args:
-        message: The incoming message as a string (expected to be JSON)
-        
-    Returns:
-        str: The processed message as a JSON string with a trailing newline
-    """
-    try:
-        # Parse the incoming message as JSON
-        data = json.loads(message)
-        
-        # Extract the original message and metadata
-        source = data.get('source', 'UNKNOWN')
-        connection_id = data.get('connection_id', 'unknown')
-        correlation_id = data.get('correlation_id', '')
-        is_api = data.get('is_api', False)
-        message_content = data.get('message', '')
-        
-        # Log if this is an API-originated message
-        if is_api:
-            logger.info(f"Processing API-originated message (Correlation ID: {correlation_id})")
-        
-        logger.debug(f"Processing message from {source} (connection: {connection_id}, correlation: {correlation_id})")
-        
-        # Here you would add your custom message processing logic
-        # For now, we'll just log and return the message as-is
-        logger.debug(f"Message content: {message_content}")
-        
-        # Create response with correlation ID
-        response = {
-            "message": message_content,
-            "correlation_id": correlation_id  # Echo back the correlation ID
-        }
-        
-        return json.dumps(response) + '\n'
-        
-    except json.JSONDecodeError as e:
-        error_msg = f"Invalid JSON: {str(e)}"
-        logger.error(f"{error_msg}. Message: {message[:200]}")
-        # Return the original message with newline if it had one
-        if not message.endswith('\n'):
-            message += '\n'
-        return message
-    except Exception as e:
-        error_msg = f"Error processing message: {str(e)}"
-        logger.error(error_msg, exc_info=DEBUG)
-        return json.dumps({"error": error_msg, "original_message": message}) + '\n'
-
-async def handler(websocket):
-    """Handle incoming WebSocket connections and messages."""
-    client_ip = websocket.remote_address[0] if websocket.remote_address else 'unknown'
-    logger.info(f"New connection from {client_ip}")
-    
-    try:
-        async for message in websocket:
-            if isinstance(message, bytes):
-                message = message.decode('utf-8')
+        Args:
+            message: The incoming message as a string (expected to be JSON).
+            client_info: Information about the client that sent the message.
             
-            logger.debug(f"Received message from {client_ip}: {message[:200]}" + 
-                       ("..." if len(message) > 200 else ""))
+        Returns:
+            str: The processed message as a JSON string with a trailing newline.
+        """
+        try:
+            # Parse the message as JSON
+            try:
+                message_data: Dict[str, Any] = json.loads(message)
+                
+                # Create message metadata
+                metadata = MessageMetadata(
+                    source=message_data.pop('source', 'unknown'),
+                    connection_id=message_data.pop('connection_id', 'unknown'),
+                    correlation_id=message_data.pop('correlation_id', ''),
+                    is_api=message_data.pop('is_api', False),
+                    custom_metadata=message_data.pop('custom_metadata', {})
+                )
+                
+                # The remaining data is the actual message content
+                message_content: RavenMessage = message_data.pop('message', {})
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse message as JSON: {e}")
+                raise ValueError(f"Invalid JSON message: {message}")
+
+            # Log processing information
+            if metadata.is_api:
+                logger.info(f"Processing API-originated message (Correlation ID: {metadata.correlation_id})")
+
+            logger.debug(
+                f"Processing message from {metadata.source} "
+                f"(client: {client_info.client_id}, "
+                f"connection: {metadata.connection_id}, "
+                f"correlation: {metadata.correlation_id})"
+            )
+            logger.debug(f"Message data: {message_content}")
+
+            # Process message through callbacks
+            processor_response: Optional[ProcessorResponse] = None
             
-            # Process the message and send response
-            response = await process_message(message)
-            await websocket.send(response)
-            logger.debug(f"Sent response: {response[:100]}..." if len(response) > 100 else f"Sent response: {response}")
+            for callback in self.message_callbacks:
+                try:
+                    result = await callback(message_content, metadata, client_info)
+                    if not result:
+                        continue
+                        
+                    if not isinstance(result, dict):
+                        logger.warning(f"Callback returned non-dict result: {result}")
+                        continue
+                        
+                    # Check for block flag
+                    if result.get('block') is True:
+                        logger.debug(f"Message blocked by callback for connection {metadata.connection_id}")
+                        return json.dumps({
+                            "block": True,
+                            "correlation_id": metadata.correlation_id
+                        }) + '\n'
+                        
+                    # Update message content if provided
+                    if 'message' in result:
+                        message_content = result['message']
+                        
+                    # Store any error
+                    if 'error' in result and result['error']:
+                        processor_response = {
+                            'error': str(result['error']),
+                            'correlation_id': metadata.correlation_id
+                        }
+                        
+                except Exception as e:
+                    error_msg = f"Error in message callback: {e}"
+                    logger.error(error_msg, exc_info=True)
+                    processor_response = {
+                        'error': error_msg,
+                        'correlation_id': metadata.correlation_id
+                    }
+                    break
+                    
+            # If there was an error in processing, return it
+            if processor_response and 'error' in processor_response:
+                return json.dumps(processor_response) + '\n'
+
+            # Prepare response with metadata
+            response = {
+                "message": message_content,  # Include all message data
+                "correlation_id": metadata.correlation_id,
+                "status": "processed"
+            }
             
-    except websockets.exceptions.ConnectionClosed:
-        logger.info(f"Connection closed by client {client_ip}")
-    except Exception as e:
-        logger.error(f"Error in connection handler: {str(e)}", exc_info=DEBUG)
-    finally:
-        logger.info(f"Connection closed for {client_ip}")
-
-async def start_server():
-    """Start the WebSocket server with the specified configuration."""
-    # Set up signal handler for graceful shutdown
-    loop = asyncio.get_running_loop()
-    # For Windows, signal handling is different
-    try:
-        loop.add_signal_handler(signal.SIGINT, handle_sigint)
-        loop.add_signal_handler(signal.SIGTERM, handle_sigint)
-    except NotImplementedError:
-        logger.warning("Signal handlers not fully supported on Windows. Use Ctrl+C to stop.")
-
-    # Start the server
-    server = await websockets.serve(
-        handler,
-        host=HOST,
-        port=PORT,
-        compression='deflate' if COMPRESSION_ENABLED else None,
-        max_size=MAX_MESSAGE_SIZE,
-        ping_interval=20,  # 20 seconds
-        ping_timeout=20,   # 20 seconds
-        close_timeout=5,   # 5 seconds
-        max_queue=32,      # 32 messages
-    )
+            # Only include source and connection_id if they're not empty
+            if metadata.source and metadata.source != "unknown":
+                response["source"] = metadata.source
+            if metadata.connection_id and metadata.connection_id != "unknown":
+                response["connection_id"] = metadata.connection_id
+            
+            return json.dumps(response) + '\n'
+            
+        except json.JSONDecodeError as e:
+            error_msg = f"Invalid JSON: {str(e)}"
+            logger.error(f"{error_msg}. Message: {message[:200]}")
+            # Return the original message with a newline if it didn't have one
+            if not message.endswith('\n'):
+                message += '\n'
+            return message
+        except Exception as e:
+            error_msg = f"Error processing message: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return json.dumps({"error": error_msg, "original_message": message}) + '\n'
     
-    logger.info(f"Message processor server started on ws://{HOST}:{PORT}")
-    logger.info("Press Ctrl+C to stop the server")
+    async def _handle_client(self, websocket: WebSocketServer) -> None:
+        """Handle a new WebSocket client connection.
+        
+        Args:
+            websocket: The WebSocket connection instance
+        """
+        client_id = str(uuid.uuid4())
+        remote_address = f"{websocket.remote_address[0]}:{websocket.remote_address[1]}"
+        
+        client_info = ClientInfo(
+            websocket=websocket,
+            client_id=client_id,
+            remote_address=remote_address
+        )
+        
+        self.clients[client_id] = client_info
+        logger.info(f"Client connected: {client_id} from {remote_address}")
+        
+        # Notify connection callbacks
+        for callback in self.connection_callbacks:
+            try:
+                await callback(client_info)
+            except Exception as e:
+                logger.error(f"Error in connection callback: {e}", exc_info=True)
+        
+        try:
+            async for message in websocket:
+                if isinstance(message, bytes):
+                    message = message.decode('utf-8')
+                
+                # Process the message
+                response = await self.process_message(message, client_info)
+                
+                # Send the response back to the client
+                if response:
+                    await websocket.send(response)
+                    
+        except websockets.exceptions.ConnectionClosed:
+            logger.info(f"Client {client_id} disconnected")
+        except Exception as e:
+            logger.error(f"Error with client {client_id}: {e}", exc_info=True)
+        finally:
+            # Clean up
+            self.clients.pop(client_id, None)
+            
+            # Notify disconnection callbacks
+            for callback in self.disconnection_callbacks:
+                try:
+                    await callback(client_info)
+                except Exception as e:
+                    logger.error(f"Error in disconnection callback: {e}", exc_info=True)
     
-    try:
-        await stop_event.wait()  # Run until we receive a stop signal
-    except asyncio.CancelledError:
-        pass
-    finally:
-        # Close the server
-        server.close()
-        await server.wait_closed()
-        logger.info("Server stopped")
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(start_server())
-    except KeyboardInterrupt:
-        logger.info("Server stopped by user")
-    except Exception as e:
-        logger.critical(f"Fatal error: {str(e)}", exc_info=DEBUG)
-        raise
+    def start(self) -> None:
+        """Start the WebSocket server.
+        
+        Note: This method is synchronous. The server will run in the current event loop.
+        """
+        if self.running:
+            logger.warning("Server is already running")
+            return
+            
+        loop = asyncio.get_event_loop()
+        
+        # Create server coroutine
+        server_coro = websockets.serve(
+            self._handle_client,
+            self.host,
+            self.port,
+            max_size=self.max_message_size,
+            ping_interval=20,  # 20 seconds
+            ping_timeout=20,   # 20 seconds
+            close_timeout=5,   # 5 seconds
+        )
+        
+        # Start the server, handling both running and new event loops
+        if loop.is_running():
+            # If loop is already running, create a task to start the server
+            async def start_server():
+                self.server = await server_coro
+                self.running = True
+                logger.info(f"WebSocket server started on ws://{self.host}:{self.port}")
+            
+            # Schedule the server to start
+            loop.create_task(start_server())
+        else:
+            # If no loop is running, use run_until_complete
+            self.server = loop.run_until_complete(server_coro)
+            self.running = True
+            logger.info(f"WebSocket server started on ws://{self.host}:{self.port}")
+            
+            # Only set up signal handlers if we're not in a running loop
+            try:
+                loop.add_signal_handler(signal.SIGINT, lambda: asyncio.create_task(self.astop()))
+                loop.add_signal_handler(signal.SIGTERM, lambda: asyncio.create_task(self.astop()))
+            except NotImplementedError:
+                # Windows compatibility
+                pass
+    
+    async def astop(self) -> None:
+        """Asynchronously stop the WebSocket server."""
+        if not self.running:
+            return
+            
+        logger.info("Stopping WebSocket server...")
+        self.running = False
+        
+        if self.server:
+            self.server.close()
+            await self.server.wait_closed()
+            self.server = None
+            
+        # Close all client connections
+        if self.clients:
+            logger.info(f"Closing {len(self.clients)} client connections...")
+            tasks = [
+                client_info.websocket.close() 
+                for client_info in self.clients.values()
+            ]
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self.clients.clear()
+            
+        logger.info("WebSocket server stopped")
+        
+    def stop(self) -> None:
+        """Synchronously stop the WebSocket server."""
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(self.astop())
+        else:
+            loop.run_until_complete(self.astop())
