@@ -14,6 +14,11 @@ Ravenfall Middleman is a proxy server designed to intercept, monitor, and modify
 - **Configurable**: Configurable via a JSON file.
 - **Auto Disconnect**: Automatically disconnects from the server after a period of inactivity to optimize resource usage.
 
+## Basic setup
+1. Edit RavenBot's `config.json`, found in the same folder as the executable. Change the `Port` number to `4050` (this is what `clientPort` is set to in the middleman's config). Save the file and restart RavenBot if it was running.
+2. Start `middleman.exe`. If things are well you should see something like `Client 127.0.0.1:xxxxx connected to port 4050`.
+3. Run your ravenfall middleman scripts
+
 ## Components
 
 The project consists of three main components:
@@ -22,84 +27,14 @@ The project consists of three main components:
 2.  **Message Processor (Python)**: An optional service to process and modify messages.
 3.  **Listener (Python)**: A utility script to monitor traffic via the Middleman's WebSocket stream.
 
-## Prerequisites
+## Prerequisites (for development)
 
 - **Go**: Required to build the Middleman.
-- **Python 3.12+**: Required for the Processor and Listener.
-
-## Installation & Usage
-
-### 1. Middleman (Core)
-
-Navigate to the `middleman` directory:
-
-```bash
-cd middleman
-```
-
-Build the project:
-
-```bash
-go build -o middleman.exe
-```
-
-Run the executable:
-
-```bash
-./middleman.exe
-```
-
-The middleman will start based on the configuration in `config.json`. By default, it listens on port `8041` and proxies to `localhost:4041`. The API is available at `http://localhost:8080`.
-
-### 2. Message Processor (Optional)
-
-If you want to modify or block messages programmatically, use the Message Processor.
-
-Navigate to the `processor` directory:
-
-```bash
-cd processor
-```
-
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Run the processor:
-
-```bash
-python message_processor.py
-```
-
-Ensure `config.json` in the `middleman` directory has `messageProcessor.enabled` set to `true`.
-
-### 3. Listener (Optional)
-
-To watch traffic in real-time from your terminal:
-
-Navigate to the `listener` directory:
-
-```bash
-cd listener
-```
-
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-Run the listener:
-
-```bash
-python websocket_client.py
-```
+- **Python 3.12+**: Required for the Processor and Listener. Older versions will probably work.
 
 ## Configuration
 
-The Middleman is configured via `middleman/config.json`:
+The Middleman is configured via `config.json`:
 
 ```json
 {
@@ -113,9 +48,9 @@ The Middleman is configured via `middleman/config.json`:
     },
     "proxy_mappings": [
         {
-            "clientPort": 8041,
+            "clientPort": 4050,
             "serverHost": "localhost",
-            "serverPort": 4041
+            "serverPort": 4040
         }
     ],
     "messageProcessor": {
@@ -128,6 +63,8 @@ The Middleman is configured via `middleman/config.json`:
 - **proxy_mappings**: Defines the ports the middleman listens on (`clientPort`) and where it forwards traffic (`serverHost`, `serverPort`).
 - **messageProcessor**: Configures the connection to the external Message Processor service.
 - **apiPort**: The port for the REST API.
+
+See [config.json](/middleman/config.json) for the config file similar to one used in my environment.
 
 ## Connection Management & Timeouts
 
@@ -146,4 +83,4 @@ When a message is received, the connection's expiry time is extended based on th
 
 The Middleman exposes a REST API for controlling connections and sending messages.
 
-See [API.md](API.md) for full documentation.
+See [API.md](API.md) for full documentation (fully ai generated).
