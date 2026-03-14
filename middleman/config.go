@@ -13,13 +13,13 @@ type Config struct {
 	DisableTimeout             bool           `json:"disableTimeout"`
 	DefaultTimeoutSeconds      int            `json:"defaultTimeoutSeconds"`
 	NoIdentifierTimeoutSeconds int            `json:"noIdentifierTimeoutSeconds"`
-	IdentifierTimeouts         map[string]int `json:"identifier_timeouts"`
+	IdentifierTimeouts         map[string]int `json:"identifierTimeouts"`
 	APIPort                    int            `json:"apiPort"`
 	ProxyMappings              []struct {
 		ClientPort int    `json:"clientPort"`
 		ServerHost string `json:"serverHost"`
 		ServerPort int    `json:"serverPort"`
-	} `json:"proxy_mappings"`
+	} `json:"proxyMappings"`
 	MessageProcessor MessageProcessorConfig `json:"messageProcessor"`
 }
 

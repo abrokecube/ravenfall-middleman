@@ -460,6 +460,13 @@ func sendErrorResponse(w http.ResponseWriter, statusCode int, message string) {
 	})
 }
 
+func sendSuccessResponse(w http.ResponseWriter, message string) {
+	sendJSONResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": message,
+	})
+}
+
 func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is accepted")
@@ -493,11 +500,7 @@ func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 		conn.addExpiry(p.defaultIdleTimeout)
 	}
 
-	response := map[string]interface{}{
-		"success": true,
-		"message": "Reconnected successfully",
-	}
-	sendJSONResponse(w, http.StatusOK, response)
+	sendSuccessResponse(w, "Reconnected successfully")
 }
 
 // ConnectionStatus represents the status of a connection
@@ -650,11 +653,7 @@ func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request)
 	}
 	p.logMessage("API-SERVER", conn.clientConn.RemoteAddr().String(), conn.clientPort, message)
 
-	response := map[string]interface{}{
-		"success": true,
-		"message": "Message sent to client",
-	}
-	sendJSONResponse(w, http.StatusOK, response)
+	sendSuccessResponse(w, "Message sent to client")
 }
 
 func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request) {
@@ -711,11 +710,7 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 	}
 	p.logMessage("API-CLIENT", conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
 
-	response := map[string]interface{}{
-		"success": true,
-		"message": "Message sent to server",
-	}
-	sendJSONResponse(w, http.StatusOK, response)
+	sendSuccessResponse(w, "Message sent to server")
 }
 
 func (p *SocketProxy) handleGetConfig(w http.ResponseWriter, r *http.Request) {
@@ -737,20 +732,20 @@ func (p *SocketProxy) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "Only POST method is accepted", http.StatusMethodNotAllowed)
+		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is accepted")
 		return
 	}
 
 	var req APIRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		sendErrorResponse(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
 
 	// Parse the request data to check for CorrelationId
 	var dataMap map[string]interface{}
 	var correlationID string
-	
+
 	if err := json.Unmarshal([]byte(req.Data), &dataMap); err == nil {
 		// If CorrelationId exists in the data and is a non-empty string, use it
 		if id, ok := dataMap["CorrelationId"].(string); ok && id != "" {
@@ -791,7 +786,7 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 	if !conn.isConnectedToServer() {
 		log.Printf("API: Server disconnected, attempting to reconnect for %s", req.ConnectionID)
 		if !conn.connectToServer(p) {
-			http.Error(w, "Failed to reconnect to server", http.StatusInternalServerError)
+			sendErrorResponse(w, http.StatusInternalServerError, "Failed to reconnect to server")
 			return
 		}
 	}

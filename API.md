@@ -119,7 +119,7 @@ Message sent to server
 
 ### 4. Send and Wait for Response
 
-Send a message to the server and wait for one or more responses.
+Send a message to the server and wait for one or more responses. Blocks matching messages from being sent to the client.
 
 ```http
 POST /api/send-and-wait-response
@@ -146,6 +146,7 @@ POST /api/send-and-wait-response
 
 ```json
 {
+  "success": true,
   "correlationId": "string",
   "responses": ["string"],
   "complete": true,
@@ -156,6 +157,7 @@ POST /api/send-and-wait-response
 ```
 
 **Fields:**
+- `success`: Always true.
 - `correlationId`: The ID used to correlate the request with responses
 - `responses`: Array of received responses
 - `complete`: Whether all expected responses were received
@@ -262,11 +264,11 @@ Messages received on this WebSocket are JSON objects with the following structur
 ```json
 {
   "source": "CLIENT",
-  "client_addr": "127.0.0.1:54321",
-  "server_addr": "localhost:4040",
-  "connection_id": "127.0.0.1_54321_4040",
-  "correlation_id": "",
-  "is_api": false,
+  "clientAddr": "127.0.0.1:54321",
+  "serverAddr": "localhost:4040",
+  "connectionId": "127.0.0.1_54321_4040",
+  "correlationId": "",
+  "isApi": false,
   "timestamp": "2023-10-27T10:00:00Z",
   "message": { ... }
 }

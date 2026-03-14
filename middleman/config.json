@@ -4,7 +4,7 @@
     "defaultTimeoutSeconds": 60,
     "noIdentifierTimeoutSeconds": 5,
     "apiPort": 7101,
-    "proxy_mappings": [
+    "proxyMappings": [
         {
             "clientPort": 4050,
             "serverHost": "127.0.0.1",
@@ -15,7 +15,7 @@
         "enabled": false,
         "url": "ws://127.0.0.1:7100"
     },
-    "identifier_timeouts": {
+    "identifierTimeouts": {
         "ferry_enter": 5, 
         "ferry_travel": 300,
         "ferry_leave": 5,
