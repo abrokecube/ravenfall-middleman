@@ -50,10 +50,20 @@ type usedCorrelationID struct {
 	timestamp time.Time
 }
 
+// MessageSource represents where a message originated from
+type MessageSource string
+
+const (
+	SourceClient    MessageSource = "CLIENT"
+	SourceServer    MessageSource = "SERVER"
+	SourceAPIClient MessageSource = "API-CLIENT"
+	SourceAPIServer MessageSource = "API-SERVER"
+)
+
 // MessageWrapper is used to wrap messages with metadata
 // when sending to the processor
 type MessageWrapper struct {
-	Source        string          `json:"source"`        // "CLIENT" "SERVER" "API-CLIENT" "API-SERVER"
+	Source        MessageSource   `json:"source"`        // Source of the message
 	ClientAddr    string          `json:"clientAddr"`    // Client's remote address
 	ServerAddr    string          `json:"serverAddr"`    // Server's address (if connected)
 	ConnectionID  string          `json:"connectionId"`  // Unique ID for this connection

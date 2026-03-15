@@ -31,8 +31,7 @@ type SocketProxy struct {
 	usedIDsMutex         sync.RWMutex
 }
 
-// broadcastMessageToClients sends the message to all connected WebSocket clients
-func (p *SocketProxy) broadcastMessageToClients(source, clientAddr string, clientPort, serverPort int, data []byte) {
+func (p *SocketProxy) broadcastMessageToClients(source MessageSource, clientAddr string, clientPort, serverPort int, data []byte) {
 	// Extract just the IP address from the client address
 	clientIP := clientAddr
 	if host, _, err := net.SplitHostPort(clientAddr); err == nil {
@@ -44,6 +43,7 @@ func (p *SocketProxy) broadcastMessageToClients(source, clientAddr string, clien
 		ClientAddr:   clientAddr,
 		ServerAddr:   fmt.Sprintf("localhost:%d", serverPort),
 		ConnectionID: fmt.Sprintf("%s_%d_%d", clientIP, clientPort, serverPort),
+		IsAPI:        source == SourceAPIClient || source == SourceAPIServer,
 		Timestamp:    time.Now().Format(time.RFC3339),
 		Message:      json.RawMessage(data),
 	}
@@ -56,7 +56,7 @@ func (p *SocketProxy) broadcastMessageToClients(source, clientAddr string, clien
 }
 
 // logMessage formats and logs a message with its direction and connection info
-func (p *SocketProxy) logMessage(source, clientAddr string, clientPort int, data []byte) {
+func (p *SocketProxy) logMessage(source MessageSource, clientAddr string, clientPort int, data []byte) {
 	// Always broadcast the message to WebSocket clients, regardless of logging setting
 	// We need to find the connection to get the server port
 	p.connMutex.Lock()
@@ -238,7 +238,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		}
 
 		// Log the received message
-		p.logMessage("CLIENT", clientAddr, clientPort, buf[:n])
+		p.logMessage(SourceClient, clientAddr, clientPort, buf[:n])
 
 		var msg ClientMessage
 		parsedWithIdentifier := false
@@ -269,7 +269,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		processedData := buf[:n]
 		if proxyConn.config != nil && proxyConn.config.MessageProcessor.Enabled {
 			// log.Printf("DEBUG: Sending to processor: %s", string(processedData))
-			processedResponse, blocked, err := proxyConn.forwardToProcessor(processedData, "client", false)
+			processedResponse, blocked, err := proxyConn.forwardToProcessor(processedData, SourceClient, false)
 			if err != nil {
 				log.Printf("Error processing message: %v. Forwarding original message.", err)
 				// Keep the original message if there was an error
@@ -635,7 +635,7 @@ func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request)
 	log.Printf("API: Sending message to client %s", req.ConnectionID)
 	// If message processor is enabled, forward through it
 	if conn.config != nil && conn.config.MessageProcessor.Enabled {
-		processed, blocked, err := conn.forwardToProcessor(message, "API-server", true)
+		processed, blocked, err := conn.forwardToProcessor(message, SourceAPIServer, true)
 		if err != nil {
 			log.Printf("Error processing API message: %v, forwarding original message", err)
 		} else if blocked {
@@ -651,7 +651,7 @@ func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request)
 		sendErrorResponse(w, http.StatusInternalServerError, "Failed to send message to client")
 		return
 	}
-	p.logMessage("API-SERVER", conn.clientConn.RemoteAddr().String(), conn.clientPort, message)
+	p.logMessage(SourceAPIServer, conn.clientConn.RemoteAddr().String(), conn.clientPort, message)
 
 	sendSuccessResponse(w, "Message sent to client")
 }
@@ -690,7 +690,7 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 
 	// If message processor is enabled, forward through it
 	if conn.config != nil && conn.config.MessageProcessor.Enabled {
-		processed, blocked, err := conn.forwardToProcessor(message, "API-client", true)
+		processed, blocked, err := conn.forwardToProcessor(message, SourceAPIClient, true)
 		if err != nil {
 			log.Printf("Error processing API message: %v, forwarding original message", err)
 		} else if blocked {
@@ -708,7 +708,7 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 		sendErrorResponse(w, http.StatusInternalServerError, "Failed to send message to server")
 		return
 	}
-	p.logMessage("API-CLIENT", conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
+	p.logMessage(SourceAPIClient, conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
 
 	sendSuccessResponse(w, "Message sent to server")
 }
@@ -800,7 +800,7 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	p.logMessage("API-CLIENT", conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
+	p.logMessage(SourceAPIClient, conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
 
 	// Wait for response(s) with timeout
 	select {

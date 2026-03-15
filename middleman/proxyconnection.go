@@ -114,7 +114,7 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []b
 	}
 
 	// Log the received message
-	proxy.logMessage("SERVER", clientConn.RemoteAddr().String(), pc.clientPort, message)
+	proxy.logMessage(SourceServer, clientConn.RemoteAddr().String(), pc.clientPort, message)
 
 	// Parse the message as JSON to check for both Identifier and CorrelationID
 	var msg ServerMessage
@@ -163,7 +163,7 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []b
 
 	// If message processor is enabled, forward through it
 	if pc.config != nil && pc.config.MessageProcessor.Enabled {
-		processed, blocked, err := pc.forwardToProcessor(message, "server", false)
+		processed, blocked, err := pc.forwardToProcessor(message, SourceServer, false)
 		if err != nil {
 			log.Printf("Error processing message: %v, falling back to direct forwarding", err)
 			// Fall back to direct forwarding on error
@@ -223,7 +223,7 @@ func (pc *ProxyConnection) forwardServerToClient(clientConn net.Conn, clientAddr
 
 				// Write any remaining buffered data before exiting
 				if len(msgBuffer) > 0 {
-					proxy.logMessage("SERVER", clientAddr, pc.clientPort, msgBuffer)
+					proxy.logMessage(SourceServer, clientAddr, pc.clientPort, msgBuffer)
 					pc.writeToClient(clientConn, clientAddr, msgBuffer, proxy)
 				}
 				return
@@ -288,7 +288,7 @@ func (pc *ProxyConnection) shouldDisconnect() bool {
 // Returns:
 //   - error if processing failed
 //   - bool indicating if the message should be blocked
-func (pc *ProxyConnection) forwardToProcessor(message []byte, source string, isAPI bool) ([]byte, bool, error) {
+func (pc *ProxyConnection) forwardToProcessor(message []byte, source MessageSource, isAPI bool) ([]byte, bool, error) {
 	if pc.config == nil || !pc.config.MessageProcessor.Enabled {
 		return message, false, nil // Processor disabled, pass through
 	}
