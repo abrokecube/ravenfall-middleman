@@ -287,34 +287,36 @@ Messages received on this WebSocket are JSON objects with the following structur
 
 ## Message Processor Server Integration
 
-The Middleman service can optionally integrate with an external Message Processor Server via a persistent WebSocket connection. This allows the processor to inspect, intercept, and modify messages in real-time as they flow between the client and the server.
+The Middleman service can optionally integrate with multiple external Message Processor Servers via persistent WebSocket connections. This allows the processors to inspect, intercept, and sequentially modify messages in real-time as they flow between the client and the server.
 
 ### Configuration
-The processor is configured in the `config.json` via the `messageProcessor` object:
+The processors are configured in the `config.json` via the `messageProcessor` object. It accepts an array of strings in the `urls` property:
 ```json
 "messageProcessor": {
   "enabled": true,
-  "url": "ws://localhost:9000/process"
+  "urls": ["ws://localhost:9000/process", "ws://localhost:9001/process"]
 }
 ```
 
 ### Connection Management
-- The Middleman maintains a persistent WebSocket connection to the processor URL (`processor_connector.go`).
-- If disconnected, it runs a background loop attempting to reconnect with a 5-second backoff.
-- The connection uses a 10-second request timeout for the initial handshake.
+- The Middleman maintains a persistent WebSocket connection to each processor URL concurrently (`processor_connector.go`).
+- If any processor disconnects, a background loop attempts to reconnect it automatically with a 5-second backoff.
+- The connections use a 10-second request timeout for the initial handshake.
 
-### Message Flow Lifecycle
-1. **Interception**: When a message arrives (from `CLIENT`, `SERVER`, or triggered via the `API`), the Middleman checks if the message processor is enabled in the configuration (`proxyconnection.go`).
+### Message Flow Lifecycle (Sequential Pipelining)
+1. **Interception**: When a message arrives (from `CLIENT`, `SERVER`, or triggered via the `API`), the Middleman checks if the message processor is enabled and if any `urls` are configured.
 2. **Wrapper Generation**: The raw message payload is wrapped inside a JSON `MessageWrapper`.
-   - The wrapper includes source metadata (`Source`), client and server network addresses, `ConnectionID`, a uniquely generated `CorrelationID` (using the connection ID and Unix timestamp), an `IsAPI` boolean flag, and a timestamp in `RFC3339` format.
-3. **Dispatch**: The serialized `MessageWrapper` is pushed as a text message over the WebSocket to the Message Processor. A wait channel is temporarily allocated for exactly that `CorrelationID` in a lock-free sync map.
+   - The wrapper includes source metadata, `ConnectionID`, a uniquely generated `CorrelationID`, `IsAPI` flag, and `RFC3339` timestamp.
+3. **Sequential Dispatch**: Middleman iterates through all configured processors in the array in sequential order limit.
+   - For each processor step, the `MessageWrapper` is pushed over the WebSocket.
 4. **Processing & Timeout**: 
    - The middleman will wait up to **5 seconds** for the external processor to respond with the matching `CorrelationID`.
-   - If the processor fails to respond within the timeframe, it logs a timeout warning and **falls back to forwarding the unmodified original message** to avoid hanging the connection.
+   - If the processor fails to respond within the timeframe, it logs a timeout warning and **falls back to passing the unmodified payload** to the next processor in the chain.
 5. **Response Handling**: The external processor must send back a `ProcessorResponse` with the same `CorrelationID`.
-   - If `block: true` is included in the response, the middleman immediately drops the message and does not forward it.
-   - If `error` parameter is provided, the middleman logs the error and forwards the original unmodified payload.
-   - If the `message` object is provided in the response (and not null), the middleman extracts this mutated payload and forwards it down the original connection instead of the original payload.
+   - If `block: true` is included in the response, the middleman **immediately drops the message, halts the pipeline, and does not forward it.**
+   - If `error` is provided, the middleman logs the error and gracefully continues the pipeline with the **unmodified payload**.
+   - If the `message` object is provided in the response (and not null), the middleman extracts this mutated payload, packages it into a new wrapper, and forwards it to the **next** processor in the pipeline.
+6. **Final Dispatch**: Once the pipeline completes (or is skipped via errors), the final mutated payload is forwarded down the original connection.
 
 ### Wrapper Schema Examples
 When sending a message to the processor:

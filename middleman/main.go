@@ -12,11 +12,11 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	if config.MessageProcessor.URL != "" {
-		log.Printf("Initializing message processor connection to %s", config.MessageProcessor.URL)
-		processorConnector.Init(config.MessageProcessor.URL)
+	if len(config.MessageProcessor.URLs) > 0 {
+		log.Printf("Initializing message processor connections to %v", config.MessageProcessor.URLs)
+		processorConnector.Init(config.MessageProcessor.URLs)
 	} else {
-		log.Println("WARN: Message processor URL not configured. Processor features will be disabled.")
+		log.Println("WARN: Message processor URLs not configured. Processor features will be disabled.")
 	}
 
 	proxy := NewSocketProxy(config)

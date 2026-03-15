@@ -40,8 +40,8 @@ type ResponseCollector struct {
 
 // MessageProcessorConfig holds the configuration for the message processor.
 type MessageProcessorConfig struct {
-	Enabled bool   `json:"enabled"`
-	URL     string `json:"url"`
+	Enabled bool     `json:"enabled"`
+	URLs    []string `json:"urls"`
 }
 
 // SocketProxy manages all proxy connections.
