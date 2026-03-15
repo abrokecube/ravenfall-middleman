@@ -262,7 +262,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		if !proxyConn.isConnectedToServer() {
 			if !proxyConn.connectToServer(p) {
 				log.Printf("Failed to connect to server for client %s", clientAddr)
-				break
+				continue
 			}
 		}
 
@@ -298,12 +298,12 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 			if err != nil {
 				log.Printf("Error writing to server: %v", err)
 				proxyConn.disconnectFromServer()
-				break
+				continue
 			}
 		} else {
 			proxyConn.mutex.Unlock() // Unlock if connection is already nil
 			log.Printf("Server connection for %s is closed, unable to forward message.", proxyConn.connectionID)
-			break
+			continue
 		}
 	}
 }
