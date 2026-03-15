@@ -285,6 +285,73 @@ Messages received on this WebSocket are JSON objects with the following structur
 
 ---
 
+## Message Processor Server Integration
+
+The Middleman service can optionally integrate with an external Message Processor Server via a persistent WebSocket connection. This allows the processor to inspect, intercept, and modify messages in real-time as they flow between the client and the server.
+
+### Configuration
+The processor is configured in the `config.json` via the `messageProcessor` object:
+```json
+"messageProcessor": {
+  "enabled": true,
+  "url": "ws://localhost:9000/process"
+}
+```
+
+### Connection Management
+- The Middleman maintains a persistent WebSocket connection to the processor URL (`processor_connector.go`).
+- If disconnected, it runs a background loop attempting to reconnect with a 5-second backoff.
+- The connection uses a 10-second request timeout for the initial handshake.
+
+### Message Flow Lifecycle
+1. **Interception**: When a message arrives (from `CLIENT`, `SERVER`, or triggered via the `API`), the Middleman checks if the message processor is enabled in the configuration (`proxyconnection.go`).
+2. **Wrapper Generation**: The raw message payload is wrapped inside a JSON `MessageWrapper`.
+   - The wrapper includes source metadata (`Source`), client and server network addresses, `ConnectionID`, a uniquely generated `CorrelationID` (using the connection ID and Unix timestamp), an `IsAPI` boolean flag, and a timestamp in `RFC3339` format.
+3. **Dispatch**: The serialized `MessageWrapper` is pushed as a text message over the WebSocket to the Message Processor. A wait channel is temporarily allocated for exactly that `CorrelationID` in a lock-free sync map.
+4. **Processing & Timeout**: 
+   - The middleman will wait up to **5 seconds** for the external processor to respond with the matching `CorrelationID`.
+   - If the processor fails to respond within the timeframe, it logs a timeout warning and **falls back to forwarding the unmodified original message** to avoid hanging the connection.
+5. **Response Handling**: The external processor must send back a `ProcessorResponse` with the same `CorrelationID`.
+   - If `block: true` is included in the response, the middleman immediately drops the message and does not forward it.
+   - If `error` parameter is provided, the middleman logs the error and forwards the original unmodified payload.
+   - If the `message` object is provided in the response (and not null), the middleman extracts this mutated payload and forwards it down the original connection instead of the original payload.
+
+### Wrapper Schema Examples
+When sending a message to the processor:
+```json
+{
+  "source": "CLIENT",
+  "clientAddr": "192.168.1.100:54321",
+  "serverAddr": "localhost:4040",
+  "connectionId": "192.168.1.100_54321_4040",
+  "correlationId": "192.168.1.100_54321_4040_1698400800000000000",
+  "isApi": false,
+  "timestamp": "2023-10-27T10:00:00Z",
+  "message": { "Identifier": "Login" }
+}
+```
+
+When receiving a successful response from the processor:
+```json
+{
+  "correlationId": "192.168.1.100_54321_4040_1698400800000000000",
+  "block": false,
+  "message": { "Identifier": "Login", "InjectedField": true }
+}
+```
+
+When receiving an error response from the processor (falls back to forwarding unmodified payload):
+```json
+{
+  "correlationId": "192.168.1.100_54321_4040_1698400800000000000",
+  "error": "Failed to authenticate against the user service",
+  "block": false,
+  "message": null
+}
+```
+
+---
+
 ## Error Responses
 
 ### 400 Bad Request

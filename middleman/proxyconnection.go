@@ -336,7 +336,7 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source MessageSour
 
 	var procResp struct {
 		ProcessorResponse
-		CorrelationID string `json:"correlation_id"`
+		CorrelationID string `json:"correlationId"`
 		Error         string `json:"error,omitempty"`
 	}
 
