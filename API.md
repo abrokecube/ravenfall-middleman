@@ -48,11 +48,13 @@ POST /api/reconnect
 - `connectionId` (string, required): The ID of the connection to reconnect
 - `timeout` (int, optional): Time in seconds before the connection times out. If not provided, uses the default timeout.
 
-**Response:**
+**Response (200 OK):**
 
-```
-200 OK
-Reconnected successfully
+```json
+{
+  "success": true,
+  "message": "Reconnected successfully"
+}
 ```
 
 ---
@@ -78,11 +80,13 @@ POST /api/send-to-client
 - `connectionId` (string, required): The ID of the target client connection
 - `data` (string, required): The message data to send to the client
 
-**Response:**
+**Response (200 OK):**
 
-```
-200 OK
-Message sent to client
+```json
+{
+  "success": true,
+  "message": "Message sent to client"
+}
 ```
 
 ---
@@ -108,11 +112,13 @@ POST /api/send-to-server
 - `connectionId` (string, required): The ID of the connection to use
 - `data` (string, required): The message data to send to the server
 
-**Response:**
+**Response (200 OK):**
 
-```
-200 OK
-Message sent to server
+```json
+{
+  "success": true,
+  "message": "Message sent to server"
+}
 ```
 
 ---
@@ -285,6 +291,7 @@ Messages received on this WebSocket are JSON objects with the following structur
 
 ```json
 {
+  "success": false,
   "error": "string"
 }
 ```
@@ -293,20 +300,25 @@ Messages received on this WebSocket are JSON objects with the following structur
 
 ```json
 {
+  "success": false,
   "error": "Connection not found"
 }
 ```
 
 ### 405 Method Not Allowed
 
-```
-Only POST method is accepted
+```json
+{
+  "success": false,
+  "error": "Only POST method is accepted"
+}
 ```
 
 ### 500 Internal Server Error
 
 ```json
 {
+  "success": false,
   "error": "string"
 }
 ```
