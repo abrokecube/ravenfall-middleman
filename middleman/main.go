@@ -12,9 +12,11 @@ func main() {
 		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	if len(config.MessageProcessor.URLs) > 0 {
+	if config.MessageProcessor.Enabled && len(config.MessageProcessor.URLs) > 0 {
 		log.Printf("Initializing message processor connections to %v", config.MessageProcessor.URLs)
 		processorConnector.Init(config.MessageProcessor.URLs)
+	} else if !config.MessageProcessor.Enabled {
+		log.Println("INFO: Message processor is disabled in config.")
 	} else {
 		log.Println("WARN: Message processor URLs not configured. Processor features will be disabled.")
 	}
