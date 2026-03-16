@@ -46,7 +46,9 @@ The Middleman is configured via `config.json`:
     ],
     "messageProcessor": {
         "enabled": false,
-        "url": "ws://localhost:8000/process"
+        "urls": [
+            "ws://127.0.0.1:7100/process"
+        ]
     }
 }
 ```
