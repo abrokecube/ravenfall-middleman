@@ -329,6 +329,7 @@ When sending a message to the processor:
   "correlationId": "192.168.1.100_54321_4040_1698400800000000000",
   "isApi": false,
   "timestamp": "2023-10-27T10:00:00Z",
+  "originalMessage": { "Identifier": "Login" },
   "message": { "Identifier": "Login" }
 }
 ```

@@ -311,15 +311,16 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source MessageSour
 		serverAddr = fmt.Sprintf("%s:%d", pc.serverConfig.Host, pc.serverConfig.Port)
 	}
 
-	msgWrapper := MessageWrapper{
-		Source:        source,
-		ClientAddr:    clientAddr,
-		ServerAddr:    serverAddr,
-		ConnectionID:  pc.connectionID,
-		CorrelationID: correlationID,
-		IsAPI:         isAPI,
-		Timestamp:     timestamp,
-		Message:       json.RawMessage(message),
+	msgWrapper := ProcessorMessageWrapper{
+		Source:          source,
+		ClientAddr:      clientAddr,
+		ServerAddr:      serverAddr,
+		ConnectionID:    pc.connectionID,
+		CorrelationID:   correlationID,
+		IsAPI:           isAPI,
+		Timestamp:       timestamp,
+		OriginalMessage: json.RawMessage(message),
+		Message:         json.RawMessage(message),
 	}
 
 	messageData, err := json.Marshal(msgWrapper)

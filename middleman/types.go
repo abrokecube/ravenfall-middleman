@@ -70,7 +70,19 @@ type MessageWrapper struct {
 	CorrelationID string          `json:"correlationId"` // Unique ID to match requests and responses
 	IsAPI         bool            `json:"isApi"`         // True if the message originated from the API
 	Timestamp     string          `json:"timestamp"`     // When the message was sent in RFC3339 format
-	Message       json.RawMessage `json:"message"`       // The original message
+	Message       json.RawMessage `json:"message"`       // The current (potentially modified) message
+}
+
+type ProcessorMessageWrapper struct {
+	Source          MessageSource   `json:"source"`          // Source of the message
+	ClientAddr      string          `json:"clientAddr"`      // Client's remote address
+	ServerAddr      string          `json:"serverAddr"`      // Server's address (if connected)
+	ConnectionID    string          `json:"connectionId"`    // Unique ID for this connection
+	CorrelationID   string          `json:"correlationId"`   // Unique ID to match requests and responses
+	IsAPI           bool            `json:"isApi"`           // True if the message originated from the API
+	Timestamp       string          `json:"timestamp"`       // When the message was sent in RFC3339 format
+	OriginalMessage json.RawMessage `json:"originalMessage"` // The original, unmodified message
+	Message         json.RawMessage `json:"message"`         // The current (potentially modified) message
 }
 
 // ProcessorResponse represents the response from the message processor

@@ -12,9 +12,9 @@
         }
     ],
     "messageProcessor": {
-        "enabled": false,
+        "enabled": true,
         "urls": [
-            "ws://127.0.0.1:7100"
+            "ws://127.0.0.1:7100/process"
         ]
     },
     "identifierTimeouts": {
