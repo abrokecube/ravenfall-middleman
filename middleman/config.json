@@ -12,7 +12,7 @@
         }
     ],
     "messageProcessor": {
-        "enabled": true,
+        "enabled": false,
         "urls": [
             "ws://127.0.0.1:7100/process"
         ]
