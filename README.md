@@ -19,18 +19,9 @@ Ravenfall Middleman is a proxy server designed to intercept, monitor, and modify
 2. Start `middleman.exe`. If things are well you should see something like `Client 127.0.0.1:xxxxx connected to port 4050`.
 3. Run your ravenfall middleman scripts
 
-## Components
-
-The project consists of three main components:
-
-1.  **Middleman (Go)**: The core proxy server.
-2.  **Message Processor (Python)**: An optional service to process and modify messages.
-3.  **Listener (Python)**: A utility script to monitor traffic via the Middleman's WebSocket stream.
-
 ## Prerequisites (for development)
 
 - **Go**: Required to build the Middleman.
-- **Python 3.12+**: Required for the Processor and Listener. Older versions will probably work.
 
 ## Configuration
 
@@ -43,10 +34,10 @@ The Middleman is configured via `config.json`:
     "defaultTimeoutSeconds": 15,
     "noIdentifierTimeoutSeconds": 5,
     "apiPort": 8080,
-    "identifier_timeouts": {
+    "identifierTimeouts": {
         "island_info": 30
     },
-    "proxy_mappings": [
+    "proxyMappings": [
         {
             "clientPort": 4050,
             "serverHost": "localhost",
@@ -60,7 +51,7 @@ The Middleman is configured via `config.json`:
 }
 ```
 
-- **proxy_mappings**: Defines the ports the middleman listens on (`clientPort`) and where it forwards traffic (`serverHost`, `serverPort`).
+- **proxyMappings**: Defines the ports the middleman listens on (`clientPort`) and where it forwards traffic (`serverHost`, `serverPort`).
 - **messageProcessor**: Configures the connection to the external Message Processor service.
 - **apiPort**: The port for the REST API.
 
@@ -75,7 +66,7 @@ This behavior is controlled by the following configuration options:
 - **disableTimeout**: Set to `true` to completely disable the timeout feature (keep connections open indefinitely).
 - **defaultTimeoutSeconds**: The default time (in seconds) to keep the connection open after receiving a message with a known identifier.
 - **noIdentifierTimeoutSeconds**: The time (in seconds) to keep the connection open after receiving a message *without* an identifier.
-- **identifier_timeouts**: A map of specific timeouts for specific message identifiers. For example, `"island_info": 30` keeps the connection open for 30 seconds after receiving an "island_info" message.
+- **identifierTimeouts**: A map of specific timeouts for specific message identifiers. For example, `"island_info": 30` keeps the connection open for 30 seconds after receiving an "island_info" message.
 
 When a message is received, the connection's expiry time is extended based on these rules. If the timer expires, the Middleman closes the connection to the server (but keeps the client connection open, ready to reconnect when the client sends a new message).
 
