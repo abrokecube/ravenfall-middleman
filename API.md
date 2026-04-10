@@ -9,7 +9,7 @@ Connection IDs are required and are assigned to each proxy mapping in the `confi
 ```json
 "proxyMappings": [
   {
-      "connectionId": "my_client_connection",
+      "connectionId": "my_ravenfall",
       "clientPort": 4050,
       "serverHost": "127.0.0.1",
       "serverPort": 4040
@@ -274,7 +274,7 @@ Messages received on this WebSocket are JSON objects with the following structur
   "source": "CLIENT",
   "clientAddr": "127.0.0.1:54321",
   "serverAddr": "localhost:4040",
-  "connectionId": "127.0.0.1_54321_4040",
+  "connectionId": "my_ravenfall",
   "correlationId": "",
   "isApi": false,
   "timestamp": "2023-10-27T10:00:00Z",
@@ -327,7 +327,7 @@ When sending a message to the processor:
   "source": "CLIENT",
   "clientAddr": "192.168.1.100:54321",
   "serverAddr": "localhost:4040",
-  "connectionId": "192.168.1.100_54321_4040",
+  "connectionId": "my_ravenfall",
   "correlationId": "192.168.1.100_54321_4040_1698400800000000000",
   "isApi": false,
   "timestamp": "2023-10-27T10:00:00Z",
