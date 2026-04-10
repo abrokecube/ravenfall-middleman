@@ -19,6 +19,7 @@ type ServerMessage struct {
 type ServerConfig struct {
 	ConnectionID string
 	ClientHost   string
+	ClientPort   int
 	Host         string
 	Port         int
 }

@@ -19,7 +19,7 @@ type SocketProxy struct {
 	listeners            map[int]net.Listener
 	listenerMutex        sync.Mutex // Protects the listeners map
 	connMutex            sync.Mutex // Protects the connections map
-	mappings             map[int]ServerConfig
+	mappings             map[string]ServerConfig
 	defaultIdleTimeout   time.Duration
 	noIdentifierTimeout  time.Duration
 	identifierTimeouts   map[string]time.Duration
@@ -34,8 +34,11 @@ type SocketProxy struct {
 func (p *SocketProxy) broadcastMessageToClients(source MessageSource, clientAddr string, clientPort, serverPort int, data []byte) {
 	// Fetch the connection ID from the configured mappings
 	connectionID := "unknown"
-	if config, ok := p.mappings[clientPort]; ok {
-		connectionID = config.ConnectionID
+	for _, mapping := range p.mappings {
+		if mapping.ClientPort == clientPort {
+			connectionID = mapping.ConnectionID
+			break
+		}
 	}
 
 	msg := MessageWrapper{
@@ -89,8 +92,11 @@ func (p *SocketProxy) logMessage(source MessageSource, clientAddr string, client
 	}
 
 	connectionID := "unknown"
-	if config, ok := p.mappings[clientPort]; ok {
-		connectionID = config.ConnectionID
+	for _, mapping := range p.mappings {
+		if mapping.ClientPort == clientPort {
+			connectionID = mapping.ConnectionID
+			break
+		}
 	}
 
 	log.Printf("[from %s] [%s] %s:%d\n%s\n", source, connectionID, clientAddr, clientPort, message)
@@ -103,11 +109,12 @@ func NewSocketProxy(config *Config) *SocketProxy {
 		config.APIPort = 8080
 	}
 
-	mappings := make(map[int]ServerConfig)
+	mappings := make(map[string]ServerConfig)
 	for _, mapping := range config.ProxyMappings {
-		mappings[mapping.ClientPort] = ServerConfig{
+		mappings[mapping.ConnectionID] = ServerConfig{
 			ConnectionID: mapping.ConnectionID,
 			ClientHost:   mapping.ClientHost,
+			ClientPort:   mapping.ClientPort,
 			Host:         mapping.ServerHost,
 			Port:         mapping.ServerPort,
 		}
@@ -152,12 +159,12 @@ func (p *SocketProxy) Start() {
 	}
 	p.listenerMutex.Unlock()
 
-	for clientPort, serverConfig := range p.mappings {
-		go func(port int, config ServerConfig) {
+	for connectionID, serverConfig := range p.mappings {
+		go func(connID string, port int, config ServerConfig) {
 			listenAddr := fmt.Sprintf("%s:%d", config.ClientHost, port)
 			listener, err := net.Listen("tcp", listenAddr)
 			if err != nil {
-				log.Printf("[%s] Failed to start server on port %d: %v", config.ConnectionID, port, err)
+				log.Printf("[%s] Failed to start server on port %d: %v", connID, port, err)
 				return
 			}
 
@@ -166,7 +173,7 @@ func (p *SocketProxy) Start() {
 			p.listeners[port] = listener
 			p.listenerMutex.Unlock()
 
-			log.Printf("[%s] Proxy listening on port %d -> %s:%d", config.ConnectionID, port, config.Host, config.Port)
+			log.Printf("[%s] Proxy listening on port %d -> %s:%d", connID, port, config.Host, config.Port)
 
 			for {
 				clientConn, err := listener.Accept()
@@ -174,7 +181,7 @@ func (p *SocketProxy) Start() {
 					if isClosedConnError(err) {
 						break
 					}
-					log.Printf("[%s] Failed to accept client connection on port %d: %v", config.ConnectionID, port, err)
+					log.Printf("[%s] Failed to accept client connection on port %d: %v", connID, port, err)
 					continue
 				}
 				go p.handleClient(clientConn, port, config)
@@ -184,7 +191,7 @@ func (p *SocketProxy) Start() {
 			p.listenerMutex.Lock()
 			delete(p.listeners, port)
 			p.listenerMutex.Unlock()
-		}(clientPort, serverConfig)
+		}(connectionID, serverConfig.ClientPort, serverConfig)
 	}
 
 	log.Println("Socket proxy started successfully")
