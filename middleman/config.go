@@ -17,6 +17,7 @@ type Config struct {
 	APIPort                    int            `json:"apiPort"`
 	ProxyMappings              []struct {
 		ConnectionID string `json:"connectionId"`
+		ClientHost   string `json:"clientHost"`
 		ClientPort   int    `json:"clientPort"`
 		ServerHost   string `json:"serverHost"`
 		ServerPort   int    `json:"serverPort"`

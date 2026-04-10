@@ -39,6 +39,8 @@ The Middleman is configured via `config.json`:
     },
     "proxyMappings": [
         {
+            "connectionId": "rf_abrokecube",
+            "clientHost": "127.0.0.1",
             "clientPort": 4050,
             "serverHost": "localhost",
             "serverPort": 4040

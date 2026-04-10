@@ -10,6 +10,7 @@ Connection IDs are required and are assigned to each proxy mapping in the `confi
 "proxyMappings": [
   {
       "connectionId": "my_ravenfall",
+      "clientHost": "127.0.0.1",
       "clientPort": 4050,
       "serverHost": "127.0.0.1",
       "serverPort": 4040

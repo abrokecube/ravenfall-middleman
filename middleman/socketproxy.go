@@ -107,6 +107,7 @@ func NewSocketProxy(config *Config) *SocketProxy {
 	for _, mapping := range config.ProxyMappings {
 		mappings[mapping.ClientPort] = ServerConfig{
 			ConnectionID: mapping.ConnectionID,
+			ClientHost:   mapping.ClientHost,
 			Host:         mapping.ServerHost,
 			Port:         mapping.ServerPort,
 		}
@@ -153,7 +154,7 @@ func (p *SocketProxy) Start() {
 
 	for clientPort, serverConfig := range p.mappings {
 		go func(port int, config ServerConfig) {
-			listenAddr := fmt.Sprintf("localhost:%d", port)
+			listenAddr := fmt.Sprintf("%s:%d", config.ClientHost, port)
 			listener, err := net.Listen("tcp", listenAddr)
 			if err != nil {
 				log.Printf("[%s] Failed to start server on port %d: %v", config.ConnectionID, port, err)

@@ -18,6 +18,7 @@ type ServerMessage struct {
 // ServerConfig holds the configuration for a target server.
 type ServerConfig struct {
 	ConnectionID string
+	ClientHost   string
 	Host         string
 	Port         int
 }
