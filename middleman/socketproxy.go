@@ -88,7 +88,12 @@ func (p *SocketProxy) logMessage(source MessageSource, clientAddr string, client
 		message = prettyJSON.String()
 	}
 
-	log.Printf("[from %s] %s:%d\n%s\n", source, clientAddr, clientPort, message)
+	connectionID := "unknown"
+	if config, ok := p.mappings[clientPort]; ok {
+		connectionID = config.ConnectionID
+	}
+
+	log.Printf("[from %s] [%s] %s:%d\n%s\n", source, connectionID, clientAddr, clientPort, message)
 }
 
 // NewSocketProxy creates a new SocketProxy.
@@ -151,7 +156,7 @@ func (p *SocketProxy) Start() {
 			listenAddr := fmt.Sprintf("localhost:%d", port)
 			listener, err := net.Listen("tcp", listenAddr)
 			if err != nil {
-				log.Printf("Failed to start server on port %d: %v", port, err)
+				log.Printf("[%s] Failed to start server on port %d: %v", config.ConnectionID, port, err)
 				return
 			}
 
@@ -160,7 +165,7 @@ func (p *SocketProxy) Start() {
 			p.listeners[port] = listener
 			p.listenerMutex.Unlock()
 
-			log.Printf("Proxy listening on port %d -> %s:%d", port, config.Host, config.Port)
+			log.Printf("[%s] Proxy listening on port %d -> %s:%d", config.ConnectionID, port, config.Host, config.Port)
 
 			for {
 				clientConn, err := listener.Accept()
@@ -168,7 +173,7 @@ func (p *SocketProxy) Start() {
 					if isClosedConnError(err) {
 						break
 					}
-					log.Printf("Failed to accept client connection on port %d: %v", port, err)
+					log.Printf("[%s] Failed to accept client connection on port %d: %v", config.ConnectionID, port, err)
 					continue
 				}
 				go p.handleClient(clientConn, port, config)
@@ -187,10 +192,10 @@ func (p *SocketProxy) Start() {
 
 func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverConfig ServerConfig) {
 	clientAddr := clientConn.RemoteAddr().String()
-	log.Printf("Client %s connected to port %d", clientAddr, clientPort)
-
 	// Use the explicit connection ID configured for this proxy mapping
 	connectionID := serverConfig.ConnectionID
+
+	log.Printf("[%s] Client %s connected to port %d", connectionID, clientAddr, clientPort)
 
 	proxyConn := &ProxyConnection{
 		connectionID: connectionID,
@@ -216,14 +221,14 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		delete(p.connections, connectionID)
 		p.connMutex.Unlock()
 		clientConn.Close()
-		log.Printf("Client %s disconnected from port %d", clientAddr, clientPort)
+		log.Printf("[%s] Client %s disconnected from port %d", connectionID, clientAddr, clientPort)
 	}()
 
 	buf := make([]byte, 4096)
 	for {
 		// Set a read deadline to prevent blocking forever
 		if err := clientConn.SetReadDeadline(time.Now().Add(p.defaultIdleTimeout)); err != nil {
-			log.Printf("Error setting read deadline on client connection: %v", err)
+			log.Printf("[%s] Error setting read deadline on client connection: %v", connectionID, err)
 			break
 		}
 
@@ -233,7 +238,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 				continue // It's a timeout, continue listening
 			}
 			if err != io.EOF && !isClosedConnError(err) {
-				log.Printf("Error reading from client %s: %v", clientAddr, err)
+				log.Printf("[%s] Error reading from client %s: %v", connectionID, clientAddr, err)
 			}
 			break
 		}
@@ -262,7 +267,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 
 		if !proxyConn.isConnectedToServer() {
 			if !proxyConn.connectToServer(p) {
-				log.Printf("Failed to connect to server for client %s", clientAddr)
+				log.Printf("[%s] Failed to connect to server for client %s", connectionID, clientAddr)
 				continue
 			}
 		}
@@ -272,11 +277,11 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 			// log.Printf("DEBUG: Sending to processor: %s", string(processedData))
 			processedResponse, blocked, err := proxyConn.forwardToProcessor(processedData, SourceClient, false)
 			if err != nil {
-				log.Printf("Error processing message: %v. Forwarding original message.", err)
+				log.Printf("[%s] Error processing message: %v. Forwarding original message.", connectionID, err)
 				// Keep the original message if there was an error
 				processedData = buf[:n]
 			} else if blocked {
-				log.Printf("Message blocked by processor")
+				log.Printf("[%s] Message blocked by processor", connectionID)
 				// Skip sending this message to the server and continue to the next message
 				continue
 			} else {
@@ -285,7 +290,7 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 					processedData = processedResponse
 					// log.Printf("DEBUG: Using processed message: %s", string(processedData))
 				} else {
-					log.Printf("WARNING: Empty response from processor, using original message")
+					log.Printf("[%s] WARNING: Empty response from processor, using original message", connectionID)
 				}
 			}
 		}
@@ -297,13 +302,13 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 			proxyConn.mutex.Unlock() // Unlock right after using shared resource
 
 			if err != nil {
-				log.Printf("Error writing to server: %v", err)
+				log.Printf("[%s] Error writing to server: %v", connectionID, err)
 				proxyConn.disconnectFromServer()
 				continue
 			}
 		} else {
 			proxyConn.mutex.Unlock() // Unlock if connection is already nil
-			log.Printf("Server connection for %s is closed, unable to forward message.", proxyConn.connectionID)
+			log.Printf("[%s] Server connection is closed, unable to forward message.", proxyConn.connectionID)
 			continue
 		}
 	}
@@ -317,7 +322,7 @@ func (p *SocketProxy) cleanupIdleConnections() {
 		p.connMutex.Lock()
 		for connectionID, proxyConn := range p.connections {
 			if proxyConn.isConnectedToServer() && proxyConn.shouldDisconnect() {
-				log.Printf("Connection %s has no active timers, disconnecting from server", connectionID)
+				log.Printf("[%s] Connection has no active timers, disconnecting from server", connectionID)
 				proxyConn.disconnectFromServer()
 			}
 		}
@@ -638,7 +643,7 @@ func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request)
 	if conn.config != nil && conn.config.MessageProcessor.Enabled {
 		processed, blocked, err := conn.forwardToProcessor(message, SourceAPIServer, true)
 		if err != nil {
-			log.Printf("Error processing API message: %v, forwarding original message", err)
+			log.Printf("[%s] Error processing API message: %v, forwarding original message", req.ConnectionID, err)
 		} else if blocked {
 			sendErrorResponse(w, http.StatusForbidden, "Message blocked by processor")
 			return
@@ -693,7 +698,7 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 	if conn.config != nil && conn.config.MessageProcessor.Enabled {
 		processed, blocked, err := conn.forwardToProcessor(message, SourceAPIClient, true)
 		if err != nil {
-			log.Printf("Error processing API message: %v, forwarding original message", err)
+			log.Printf("[%s] Error processing API message: %v, forwarding original message", req.ConnectionID, err)
 		} else if blocked {
 			sendErrorResponse(w, http.StatusForbidden, "Message blocked by processor")
 			return

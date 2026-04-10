@@ -32,14 +32,14 @@ func (pc *ProxyConnection) connectToServer(p *SocketProxy) bool {
 	defer pc.mutex.Unlock()
 
 	serverAddr := net.JoinHostPort(pc.serverConfig.Host, strconv.Itoa(pc.serverConfig.Port))
-	log.Printf("Connecting to server %s", serverAddr)
+	log.Printf("[%s] Connecting to server %s", pc.connectionID, serverAddr)
 	conn, err := net.Dial("tcp", serverAddr)
 	if err != nil {
-		log.Printf("Failed to connect to server %s: %v", serverAddr, err)
+		log.Printf("[%s] Failed to connect to server %s: %v", pc.connectionID, serverAddr, err)
 		return false
 	}
 	pc.serverConn = conn
-	log.Printf("Connected to server %s", serverAddr)
+	log.Printf("[%s] Connected to server %s", pc.connectionID, serverAddr)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	pc.cancelForward = cancel
@@ -53,7 +53,7 @@ func (pc *ProxyConnection) disconnectFromServer() {
 	defer pc.mutex.Unlock()
 
 	if pc.serverConn != nil {
-		log.Printf("Disconnecting from server %s:%d", pc.serverConfig.Host, pc.serverConfig.Port)
+		log.Printf("[%s] Disconnecting from server %s:%d", pc.connectionID, pc.serverConfig.Host, pc.serverConfig.Port)
 		if tcpConn, ok := pc.serverConn.(*net.TCPConn); ok {
 			tcpConn.SetLinger(0)
 		}
@@ -102,7 +102,7 @@ func (pc *ProxyConnection) writeToClient(conn net.Conn, clientAddr string, data 
 	// Write the data to the client
 	_, err := conn.Write(data)
 	if err != nil && !isClosedConnError(err) {
-		log.Printf("Error writing to client %s: %v", clientAddr, err)
+		log.Printf("[%s] Error writing to client %s: %v", pc.connectionID, clientAddr, err)
 	}
 	return err
 }
@@ -135,7 +135,7 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []b
 		if correlationID := msg.CorrelationID; correlationID != "" {
 			// First check if this correlation ID has already been used
 			if proxy.isCorrelationIDUsed(correlationID) {
-				log.Printf("Dropping message with used correlation ID: %s", correlationID)
+				log.Printf("[%s] Dropping message with used correlation ID: %s", pc.connectionID, correlationID)
 				return // Don't forward to client
 			}
 
@@ -165,12 +165,12 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []b
 	if pc.config != nil && pc.config.MessageProcessor.Enabled {
 		processed, blocked, err := pc.forwardToProcessor(message, SourceServer, false)
 		if err != nil {
-			log.Printf("Error processing message: %v, falling back to direct forwarding", err)
+			log.Printf("[%s] Error processing message: %v, falling back to direct forwarding", pc.connectionID, err)
 			// Fall back to direct forwarding on error
 			_, _ = clientConn.Write(message)
 			return
 		} else if blocked {
-			log.Printf("Message blocked by processor")
+			log.Printf("[%s] Message blocked by processor", pc.connectionID)
 			return
 		} else {
 			// Only update message if we got a new one
@@ -205,7 +205,7 @@ func (pc *ProxyConnection) forwardServerToClient(clientConn net.Conn, clientAddr
 			// Set read deadline to allow for periodic context checks
 			if err := pc.serverConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
 				if !isClosedConnError(err) {
-					log.Printf("Error setting read deadline for client %s: %v", clientAddr, err)
+					log.Printf("[%s] Error setting read deadline for client %s: %v", pc.connectionID, clientAddr, err)
 				}
 				return
 			}
@@ -218,7 +218,7 @@ func (pc *ProxyConnection) forwardServerToClient(clientConn net.Conn, clientAddr
 				}
 
 				if err != io.EOF && !isClosedConnError(err) {
-					log.Printf("Error reading from server for client %s: %v", clientAddr, err)
+					log.Printf("[%s] Error reading from server for client %s: %v", pc.connectionID, clientAddr, err)
 				}
 
 				// Write any remaining buffered data before exiting
@@ -325,13 +325,13 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source MessageSour
 
 	messageData, err := json.Marshal(msgWrapper)
 	if err != nil {
-		log.Printf("ERROR: Failed to marshal message wrapper: %v", err)
+		log.Printf("[%s] ERROR: Failed to marshal message wrapper: %v", pc.connectionID, err)
 		return nil, true, fmt.Errorf("failed to marshal message wrapper: %w", err)
 	}
 
 	response, err := processorConnector.Send(messageData, correlationID)
 	if err != nil {
-		log.Printf("ERROR: Failed to send message to processor: %v", err)
+		log.Printf("[%s] ERROR: Failed to send message to processor: %v", pc.connectionID, err)
 		return nil, true, fmt.Errorf("failed to communicate with processor: %w", err)
 	}
 
@@ -342,17 +342,17 @@ func (pc *ProxyConnection) forwardToProcessor(message []byte, source MessageSour
 	}
 
 	if err := json.Unmarshal(response, &procResp); err != nil {
-		log.Printf("ERROR: Failed to parse processor response: %v", err)
+		log.Printf("[%s] ERROR: Failed to parse processor response: %v", pc.connectionID, err)
 		return nil, true, fmt.Errorf("failed to parse processor response: %w", err)
 	}
 
 	if procResp.CorrelationID != correlationID {
-		log.Printf("WARN: Mismatched correlation ID. Expected %s, got %s", correlationID, procResp.CorrelationID)
+		log.Printf("[%s] WARN: Mismatched correlation ID. Expected %s, got %s", pc.connectionID, correlationID, procResp.CorrelationID)
 		return nil, true, fmt.Errorf("mismatched correlation ID")
 	}
 
 	if procResp.Error != "" {
-		log.Printf("ERROR: Processor returned an error: %s", procResp.Error)
+		log.Printf("[%s] ERROR: Processor returned an error: %s", pc.connectionID, procResp.Error)
 		return nil, true, fmt.Errorf("processor error: %s", procResp.Error)
 	}
 
