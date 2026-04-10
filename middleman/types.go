@@ -17,8 +17,9 @@ type ServerMessage struct {
 
 // ServerConfig holds the configuration for a target server.
 type ServerConfig struct {
-	Host string
-	Port int
+	ConnectionID string
+	Host         string
+	Port         int
 }
 
 // APIRequest defines the structure for API requests.

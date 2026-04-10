@@ -6,6 +6,7 @@
     "apiPort": 7101,
     "proxyMappings": [
         {
+            "connectionId": "rf_abrokecube",
             "clientPort": 4050,
             "serverHost": "127.0.0.1",
             "serverPort": 4040

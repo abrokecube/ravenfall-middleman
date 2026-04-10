@@ -4,18 +4,20 @@ This document describes the REST API provided by the Ravenfall Middleman service
 
 ## Connection IDs
 
-Connection IDs are automatically generated when a client connects to the middleman. They follow this format:
+Connection IDs are required and are assigned to each proxy mapping in the `config.json` via the `connectionId` property:
 
+```json
+"proxyMappings": [
+  {
+      "connectionId": "my_client_connection",
+      "clientPort": 4050,
+      "serverHost": "127.0.0.1",
+      "serverPort": 4040
+  }
+]
 ```
-<client-ip>_<client-port>_<server-port>
-```
 
-For example: `192.168.1.100_8041_4041`
-
-Where:
-- `client-ip` - The IP address of the client that connected
-- `client-port` - The port on the middleman that the client connected to
-- `server-port` - The port of the target server that the middleman is proxying to
+When communicating via the API endpoints below (like sending messages or forcing reconnects), you will use the `connectionId` specified in your proxy configuration.
 
 ## Base URL
 

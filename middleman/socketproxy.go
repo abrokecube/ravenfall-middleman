@@ -32,17 +32,17 @@ type SocketProxy struct {
 }
 
 func (p *SocketProxy) broadcastMessageToClients(source MessageSource, clientAddr string, clientPort, serverPort int, data []byte) {
-	// Extract just the IP address from the client address
-	clientIP := clientAddr
-	if host, _, err := net.SplitHostPort(clientAddr); err == nil {
-		clientIP = host
+	// Fetch the connection ID from the configured mappings
+	connectionID := "unknown"
+	if config, ok := p.mappings[clientPort]; ok {
+		connectionID = config.ConnectionID
 	}
 
 	msg := MessageWrapper{
 		Source:       source,
 		ClientAddr:   clientAddr,
 		ServerAddr:   fmt.Sprintf("localhost:%d", serverPort),
-		ConnectionID: fmt.Sprintf("%s_%d_%d", clientIP, clientPort, serverPort),
+		ConnectionID: connectionID,
 		IsAPI:        source == SourceAPIClient || source == SourceAPIServer,
 		Timestamp:    time.Now().Format(time.RFC3339),
 		Message:      json.RawMessage(data),
@@ -101,8 +101,9 @@ func NewSocketProxy(config *Config) *SocketProxy {
 	mappings := make(map[int]ServerConfig)
 	for _, mapping := range config.ProxyMappings {
 		mappings[mapping.ClientPort] = ServerConfig{
-			Host: mapping.ServerHost,
-			Port: mapping.ServerPort,
+			ConnectionID: mapping.ConnectionID,
+			Host:         mapping.ServerHost,
+			Port:         mapping.ServerPort,
 		}
 	}
 
@@ -188,8 +189,8 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 	clientAddr := clientConn.RemoteAddr().String()
 	log.Printf("Client %s connected to port %d", clientAddr, clientPort)
 
-	// Generate a connection ID using remote address, client port, and server port
-	connectionID := fmt.Sprintf("%s_%d_%d", serverConfig.Host, clientPort, serverConfig.Port)
+	// Use the explicit connection ID configured for this proxy mapping
+	connectionID := serverConfig.ConnectionID
 
 	proxyConn := &ProxyConnection{
 		connectionID: connectionID,

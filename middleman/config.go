@@ -16,9 +16,10 @@ type Config struct {
 	IdentifierTimeouts         map[string]int `json:"identifierTimeouts"`
 	APIPort                    int            `json:"apiPort"`
 	ProxyMappings              []struct {
-		ClientPort int    `json:"clientPort"`
-		ServerHost string `json:"serverHost"`
-		ServerPort int    `json:"serverPort"`
+		ConnectionID string `json:"connectionId"`
+		ClientPort   int    `json:"clientPort"`
+		ServerHost   string `json:"serverHost"`
+		ServerPort   int    `json:"serverPort"`
 	} `json:"proxyMappings"`
 	MessageProcessor MessageProcessorConfig `json:"messageProcessor"`
 }
