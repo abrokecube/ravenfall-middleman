@@ -3,6 +3,7 @@
     "disableTimeout": true,
     "defaultTimeoutSeconds": 60,
     "noIdentifierTimeoutSeconds": 5,
+    "maxWriteRetries": 3,
     "apiPort": 7101,
     "proxyMappings": [
         {

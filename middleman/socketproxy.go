@@ -304,19 +304,41 @@ func (p *SocketProxy) handleClient(clientConn net.Conn, clientPort int, serverCo
 		}
 
 		// log.Printf("DEBUG: Forwarding to server: %s", string(processedData))
-		proxyConn.mutex.Lock()
-		if proxyConn.serverConn != nil {
-			_, err := proxyConn.serverConn.Write(processedData)
-			proxyConn.mutex.Unlock() // Unlock right after using shared resource
+		maxRetries := p.config.MaxWriteRetries
+		if maxRetries <= 0 {
+			maxRetries = 1 // Default to 1 attempt if not configured
+		}
 
-			if err != nil {
-				log.Printf("[%s] Error writing to server: %v", connectionID, err)
-				proxyConn.disconnectFromServer()
-				continue
+		var writeErr error
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			proxyConn.mutex.Lock()
+			if proxyConn.serverConn != nil {
+				_, writeErr = proxyConn.serverConn.Write(processedData)
+				proxyConn.mutex.Unlock() // Unlock right after using shared resource
+
+				if writeErr == nil {
+					break // Success
+				}
+
+				if attempt < maxRetries-1 {
+					log.Printf("[%s] Error writing to server (attempt %d/%d), reconnecting: %v", connectionID, attempt+1, maxRetries, writeErr)
+					proxyConn.disconnectFromServer()
+					proxyConn.connectToServer(p)
+				}
+			} else {
+				proxyConn.mutex.Unlock() // Unlock if connection is already nil
+				writeErr = fmt.Errorf("server connection is closed")
+
+				if attempt < maxRetries-1 {
+					log.Printf("[%s] Server connection was closed (attempt %d/%d), reconnecting...", connectionID, attempt+1, maxRetries)
+					proxyConn.connectToServer(p)
+				}
 			}
-		} else {
-			proxyConn.mutex.Unlock() // Unlock if connection is already nil
-			log.Printf("[%s] Server connection is closed, unable to forward message.", proxyConn.connectionID)
+		}
+
+		if writeErr != nil {
+			log.Printf("[%s] Failed to write to server after %d attempts: %v", connectionID, maxRetries, writeErr)
+			proxyConn.disconnectFromServer()
 			continue
 		}
 	}
@@ -716,9 +738,40 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	conn.mutex.Lock()
-	defer conn.mutex.Unlock()
-	if _, err := conn.serverConn.Write(message); err != nil {
+	maxRetries := p.config.MaxWriteRetries
+	if maxRetries <= 0 {
+		maxRetries = 1 // Default to 1 attempt if not configured
+	}
+
+	var writeErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		conn.mutex.Lock()
+		if conn.serverConn != nil {
+			_, writeErr = conn.serverConn.Write(message)
+			conn.mutex.Unlock()
+
+			if writeErr == nil {
+				break // Success
+			}
+
+			if attempt < maxRetries-1 {
+				log.Printf("[%s] API Error writing to server (attempt %d/%d), reconnecting: %v", req.ConnectionID, attempt+1, maxRetries, writeErr)
+				conn.disconnectFromServer()
+				conn.connectToServer(p)
+			}
+		} else {
+			conn.mutex.Unlock()
+			writeErr = fmt.Errorf("server connection is closed")
+
+			if attempt < maxRetries-1 {
+				log.Printf("[%s] API Server connection was closed (attempt %d/%d), reconnecting...", req.ConnectionID, attempt+1, maxRetries)
+				conn.connectToServer(p)
+			}
+		}
+	}
+
+	if writeErr != nil {
+		log.Printf("[%s] API Failed to send message to server after %d attempts: %v", req.ConnectionID, maxRetries, writeErr)
 		sendErrorResponse(w, http.StatusInternalServerError, "Failed to send message to server")
 		return
 	}
@@ -805,11 +858,41 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 		}
 	}
 
-	conn.mutex.Lock()
-	_, err := conn.serverConn.Write(ensureNewline([]byte(req.Data)))
-	conn.mutex.Unlock()
+	maxRetries := p.config.MaxWriteRetries
+	if maxRetries <= 0 {
+		maxRetries = 1 // Default to 1 attempt if not configured
+	}
 
-	if err != nil {
+	var writeErr error
+	msgData := ensureNewline([]byte(req.Data))
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		conn.mutex.Lock()
+		if conn.serverConn != nil {
+			_, writeErr = conn.serverConn.Write(msgData)
+			conn.mutex.Unlock()
+
+			if writeErr == nil {
+				break // Success
+			}
+
+			if attempt < maxRetries-1 {
+				log.Printf("[%s] API Error writing to server and wait response (attempt %d/%d), reconnecting: %v", req.ConnectionID, attempt+1, maxRetries, writeErr)
+				conn.disconnectFromServer()
+				conn.connectToServer(p)
+			}
+		} else {
+			conn.mutex.Unlock()
+			writeErr = fmt.Errorf("server connection is closed")
+
+			if attempt < maxRetries-1 {
+				log.Printf("[%s] API Server connection was closed for send and wait response (attempt %d/%d), reconnecting...", req.ConnectionID, attempt+1, maxRetries)
+				conn.connectToServer(p)
+			}
+		}
+	}
+
+	if writeErr != nil {
+		log.Printf("[%s] API Failed to send message to server and wait response after %d attempts: %v", req.ConnectionID, maxRetries, writeErr)
 		sendErrorResponse(w, http.StatusInternalServerError, "Failed to send message to server")
 		return
 	}

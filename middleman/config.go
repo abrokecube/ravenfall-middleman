@@ -15,6 +15,7 @@ type Config struct {
 	NoIdentifierTimeoutSeconds int            `json:"noIdentifierTimeoutSeconds"`
 	IdentifierTimeouts         map[string]int `json:"identifierTimeouts"`
 	APIPort                    int            `json:"apiPort"`
+	MaxWriteRetries            int            `json:"maxWriteRetries"`
 	ProxyMappings              []struct {
 		ConnectionID string `json:"connectionId"`
 		ClientHost   string `json:"clientHost"`
