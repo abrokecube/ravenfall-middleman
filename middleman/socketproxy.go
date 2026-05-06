@@ -505,7 +505,7 @@ func sendSuccessResponse(w http.ResponseWriter, message string) {
 
 func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is accepted")
+		sendErrorResponse(w, http.StatusMethodNotAllowed, fmt.Sprintf("Only POST method is accepted, but got %s", r.Method))
 		return
 	}
 
@@ -550,7 +550,7 @@ type ConnectionStatus struct {
 // handleConnectionStatus returns the status of a connection
 func (p *SocketProxy) handleConnectionStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only GET method is accepted")
+		sendErrorResponse(w, http.StatusMethodNotAllowed, fmt.Sprintf("Only GET method is accepted, but got %s", r.Method))
 		return
 	}
 
@@ -599,7 +599,7 @@ func (p *SocketProxy) handleConnectionStatus(w http.ResponseWriter, r *http.Requ
 // If the connection is already active, it will remain connected.
 func (p *SocketProxy) handleEnsureConnected(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is accepted")
+		sendErrorResponse(w, http.StatusMethodNotAllowed, fmt.Sprintf("Only POST method is accepted, but got %s", r.Method))
 		return
 	}
 
@@ -647,7 +647,7 @@ func (p *SocketProxy) handleEnsureConnected(w http.ResponseWriter, r *http.Reque
 
 func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is accepted")
+		sendErrorResponse(w, http.StatusMethodNotAllowed, fmt.Sprintf("Only POST method is accepted, but got %s", r.Method))
 		return
 	}
 
@@ -694,7 +694,7 @@ func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request)
 
 func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is accepted")
+		sendErrorResponse(w, http.StatusMethodNotAllowed, fmt.Sprintf("Only POST method is accepted, but got %s", r.Method))
 		return
 	}
 
@@ -782,7 +782,7 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 
 func (p *SocketProxy) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only GET method is allowed")
+		sendErrorResponse(w, http.StatusMethodNotAllowed, fmt.Sprintf("Only GET method is allowed, but got %s", r.Method))
 		return
 	}
 
@@ -799,7 +799,7 @@ func (p *SocketProxy) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 
 func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		sendErrorResponse(w, http.StatusMethodNotAllowed, "Only POST method is accepted")
+		sendErrorResponse(w, http.StatusMethodNotAllowed, fmt.Sprintf("Only POST method is accepted, but got %s", r.Method))
 		return
 	}
 
