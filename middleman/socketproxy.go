@@ -68,7 +68,10 @@ func (p *SocketProxy) logMessage(source MessageSource, clientAddr string, client
 	// Try to find a matching connection to get the server port
 	serverPort := 0 // Default to 0 if we can't find the connection
 	for _, conn := range p.connections {
-		if conn.clientConn.RemoteAddr().String() == clientAddr && conn.clientPort == clientPort {
+		if conn.clientConn != nil && conn.clientConn.RemoteAddr().String() == clientAddr && conn.clientPort == clientPort {
+			serverPort = conn.serverConfig.Port
+			break
+		} else if conn.clientConn == nil && clientAddr == "unknown_client" && conn.clientPort == clientPort {
 			serverPort = conn.serverConfig.Port
 			break
 		}
@@ -503,6 +506,31 @@ func sendSuccessResponse(w http.ResponseWriter, message string) {
 	})
 }
 
+// getOrCreateConnection retrieves an existing connection or creates a disconnected one if it exists in mappings
+func (p *SocketProxy) getOrCreateConnection(connectionID string) (*ProxyConnection, bool) {
+	p.connMutex.Lock()
+	defer p.connMutex.Unlock()
+
+	conn, ok := p.connections[connectionID]
+	if !ok {
+		if mapping, hasMapping := p.mappings[connectionID]; hasMapping {
+			conn = &ProxyConnection{
+				connectionID: connectionID,
+				serverConfig: mapping,
+				clientPort:   mapping.ClientPort,
+				config:       p.config,
+				mutex:        sync.Mutex{},
+			}
+			if p.connections == nil {
+				p.connections = make(map[string]*ProxyConnection)
+			}
+			p.connections[connectionID] = conn
+			ok = true
+		}
+	}
+	return conn, ok
+}
+
 func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		sendErrorResponse(w, http.StatusMethodNotAllowed, fmt.Sprintf("Only POST method is accepted, but got %s", r.Method))
@@ -515,9 +543,7 @@ func (p *SocketProxy) handleReconnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p.connMutex.Lock()
-	conn, ok := p.connections[req.ConnectionID]
-	p.connMutex.Unlock()
+	conn, ok := p.getOrCreateConnection(req.ConnectionID)
 
 	if !ok {
 		sendErrorResponse(w, http.StatusNotFound, "Connection not found")
@@ -560,9 +586,7 @@ func (p *SocketProxy) handleConnectionStatus(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	p.connMutex.Lock()
-	conn, ok := p.connections[connectionID]
-	p.connMutex.Unlock()
+	conn, ok := p.getOrCreateConnection(connectionID)
 
 	if !ok {
 		sendErrorResponse(w, http.StatusNotFound, "Connection not found")
@@ -609,9 +633,7 @@ func (p *SocketProxy) handleEnsureConnected(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	p.connMutex.Lock()
-	conn, ok := p.connections[req.ConnectionID]
-	p.connMutex.Unlock()
+	conn, ok := p.getOrCreateConnection(req.ConnectionID)
 
 	if !ok {
 		sendErrorResponse(w, http.StatusNotFound, "Connection not found")
@@ -657,9 +679,7 @@ func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	p.connMutex.Lock()
-	conn, ok := p.connections[req.ConnectionID]
-	p.connMutex.Unlock()
+	conn, ok := p.getOrCreateConnection(req.ConnectionID)
 
 	if !ok {
 		sendErrorResponse(w, http.StatusNotFound, "Connection not found")
@@ -683,11 +703,18 @@ func (p *SocketProxy) handleSendToClient(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if err := conn.writeToClient(conn.clientConn, conn.clientConn.RemoteAddr().String(), message, p); err != nil {
+	var clientAddr string
+	if conn.clientConn != nil {
+		clientAddr = conn.clientConn.RemoteAddr().String()
+	} else {
+		clientAddr = "unknown_client"
+	}
+
+	if err := conn.writeToClient(conn.clientConn, clientAddr, message, p); err != nil {
 		sendErrorResponse(w, http.StatusInternalServerError, "Failed to send message to client")
 		return
 	}
-	p.logMessage(SourceAPIServer, conn.clientConn.RemoteAddr().String(), conn.clientPort, message)
+	p.logMessage(SourceAPIServer, clientAddr, conn.clientPort, message)
 
 	sendSuccessResponse(w, "Message sent to client")
 }
@@ -704,9 +731,7 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	p.connMutex.Lock()
-	conn, ok := p.connections[req.ConnectionID]
-	p.connMutex.Unlock()
+	conn, ok := p.getOrCreateConnection(req.ConnectionID)
 
 	if !ok {
 		sendErrorResponse(w, http.StatusNotFound, "Connection not found")
@@ -775,7 +800,13 @@ func (p *SocketProxy) handleSendToServer(w http.ResponseWriter, r *http.Request)
 		sendErrorResponse(w, http.StatusInternalServerError, "Failed to send message to server")
 		return
 	}
-	p.logMessage(SourceAPIClient, conn.clientConn.RemoteAddr().String(), conn.clientPort, ensureNewline([]byte(req.Data)))
+	var clientAddr string
+	if conn.clientConn != nil {
+		clientAddr = conn.clientConn.RemoteAddr().String()
+	} else {
+		clientAddr = "unknown_client"
+	}
+	p.logMessage(SourceAPIClient, clientAddr, conn.clientPort, ensureNewline([]byte(req.Data)))
 
 	sendSuccessResponse(w, "Message sent to server")
 }
@@ -836,9 +867,7 @@ func (p *SocketProxy) handleSendAndWaitResponse(w http.ResponseWriter, r *http.R
 	}
 
 	// Get the connection
-	p.connMutex.Lock()
-	conn, exists := p.connections[req.ConnectionID]
-	p.connMutex.Unlock()
+	conn, exists := p.getOrCreateConnection(req.ConnectionID)
 
 	if !exists {
 		sendErrorResponse(w, http.StatusNotFound, "Connection not found")

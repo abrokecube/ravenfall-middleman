@@ -43,7 +43,13 @@ func (pc *ProxyConnection) connectToServer(p *SocketProxy) bool {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	pc.cancelForward = cancel
-	go pc.forwardServerToClient(pc.clientConn, pc.clientAddr.String(), ctx, p)
+	var clientAddrStr string
+	if pc.clientAddr != nil {
+		clientAddrStr = pc.clientAddr.String()
+	} else {
+		clientAddrStr = "unknown_client"
+	}
+	go pc.forwardServerToClient(pc.clientConn, clientAddrStr, ctx, p)
 
 	return true
 }
@@ -99,6 +105,11 @@ func (pc *ProxyConnection) writeToClient(conn net.Conn, clientAddr string, data 
 
 	// Log the message being sent to the client
 
+	if conn == nil {
+		log.Printf("[%s] Warning: Attempted to write to client, but no client is connected", pc.connectionID)
+		return nil
+	}
+
 	// Write the data to the client
 	_, err := conn.Write(data)
 	if err != nil && !isClosedConnError(err) {
@@ -113,8 +124,15 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []b
 		return
 	}
 
+	var clientAddr string
+	if clientConn != nil {
+		clientAddr = clientConn.RemoteAddr().String()
+	} else {
+		clientAddr = "unknown_client"
+	}
+
 	// Log the received message
-	proxy.logMessage(SourceServer, clientConn.RemoteAddr().String(), pc.clientPort, message)
+	proxy.logMessage(SourceServer, clientAddr, pc.clientPort, message)
 
 	// Parse the message as JSON to check for both Identifier and CorrelationID
 	var msg ServerMessage
@@ -167,7 +185,9 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []b
 		if err != nil {
 			log.Printf("[%s] Error processing message: %v, falling back to direct forwarding", pc.connectionID, err)
 			// Fall back to direct forwarding on error
-			_, _ = clientConn.Write(message)
+			if clientConn != nil {
+				_, _ = clientConn.Write(message)
+			}
 			return
 		} else if blocked {
 			log.Printf("[%s] Message blocked by processor", pc.connectionID)
@@ -181,7 +201,9 @@ func (pc *ProxyConnection) processServerMessage(clientConn net.Conn, message []b
 	}
 
 	// Forward the (possibly processed) message to the client
-	_, _ = clientConn.Write(message)
+	if clientConn != nil {
+		_, _ = clientConn.Write(message)
+	}
 }
 
 // forwardServerToClient forwards messages from the server to the client
